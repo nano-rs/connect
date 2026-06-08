@@ -3,7 +3,7 @@ import pc from "picocolors";
 import { writeArtifacts } from "./core/artifacts.js";
 import { SYSLOG_CATALOG } from "./core/catalog.js";
 import { resolveSavedConnection } from "./core/connection.js";
-import { isInsecureRemote } from "./core/endpoints.js";
+import { unauthenticatedVectorWarning, validateHost, validatePort } from "./core/target.js";
 import {
   buildDockerCompose,
   buildReadme,
@@ -12,6 +12,7 @@ import {
   type SyslogPlan,
 } from "./core/syslog.js";
 import { NanoApiError } from "./core/types.js";
+import { DEFAULT_IMAGE } from "./core/vector.js";
 import { orExit } from "./ui/ui.js";
 
 export interface AddSourceOptions {
@@ -27,11 +28,8 @@ export interface AddSourceOptions {
   nonInteractive?: boolean;
 }
 
-const HOST_RE = /^[A-Za-z0-9._\-:[\]]+$/;
-
 const DEFAULT_VECTOR_PORT = 6000;
 const DEFAULT_BUFFER_BYTES = 536_870_912; // 512 MB
-const DEFAULT_IMAGE = "timberio/vector:latest-alpine";
 
 export async function runAddSource(opts: AddSourceOptions): Promise<void> {
   if (!process.stdin.isTTY) opts = { ...opts, nonInteractive: true };
@@ -74,22 +72,14 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
 
   // nano's Vector-native target. URL-derived hostname is already sanitized; a raw --vector-host
   // is interpolated into the generated TOML, so validate it can't break out of the string.
-  if (opts.vectorHost !== undefined && !HOST_RE.test(opts.vectorHost)) {
-    throw new NanoApiError(`Invalid --vector-host "${opts.vectorHost}" (expected a hostname or IP).`);
-  }
+  if (opts.vectorHost !== undefined) validateHost(opts.vectorHost, "--vector-host");
   const nanoHost = opts.vectorHost ?? new URL(conn.baseUrl).hostname;
-  const nanoPort = Number(opts.vectorPort ?? DEFAULT_VECTOR_PORT);
-  if (!Number.isInteger(nanoPort) || nanoPort <= 0 || nanoPort > 65535) {
-    throw new NanoApiError(`Invalid Vector port: ${opts.vectorPort}`);
-  }
+  const nanoPort = validatePort(Number(opts.vectorPort ?? DEFAULT_VECTOR_PORT), "--vector-port");
 
   // Vector-native (:6000) is unauthenticated in nano's config — fine on a trusted network/VPN,
   // risky across the internet. Warn when the target looks like a public/remote host.
-  if (new URL(conn.baseUrl).protocol === "https:" || isInsecureRemote(conn.baseUrl)) {
-    log.warn(
-      `nano's Vector-native port (${nanoHost}:${nanoPort}) has no auth — only forward to it over a trusted network or VPN. If nano is remote/SaaS, that port may not be reachable; use the HTTPS path instead (coming soon) or a private link.`,
-    );
-  }
+  const warning = unauthenticatedVectorWarning(conn.baseUrl, nanoHost, nanoPort);
+  if (warning) log.warn(warning);
 
   const plan: SyslogPlan = {
     selected,

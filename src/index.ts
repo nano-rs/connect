@@ -1,6 +1,8 @@
 import { Command } from "commander";
 import pc from "picocolors";
 import pkg from "../package.json" with { type: "json" };
+import { type AddAgentOptions, runAddAgent } from "./addAgent.js";
+import { type AddAggregatorOptions, runAddAggregator } from "./addAggregator.js";
 import { type AddSourceOptions, runAddSource } from "./addSource.js";
 import { type ConnectOptions, runConnect } from "./flow.js";
 import { NanoApiError } from "./core/types.js";
@@ -76,6 +78,68 @@ program
     };
     try {
       await runAddSource(opts);
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+program
+  .command("add-agent")
+  .description("Generate an endpoint agent (Windows Event Log / Linux journald+files) that ships to an aggregator or nano.")
+  .option("--url <baseUrl>", "nano base URL (defaults to your saved connection)")
+  .option("--api-key <key>", "nano API key (defaults to your saved connection)")
+  .option("--env-file <path>", "path to a nano install .env to read connection details from")
+  .option("--os <os>", "endpoint OS: windows | linux")
+  .option("--target <host:port>", "where the agent ships (an aggregator), default port 9000")
+  .option("--to-nano", "ship straight to nano (:6000) instead of an aggregator")
+  .option("--no-journald", "(linux) don't collect journald")
+  .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/agent-<os>)")
+  .option("--non-interactive", "fail instead of prompting when a required value is missing")
+  .action(async (raw: Record<string, unknown>) => {
+    const opts: AddAgentOptions = {
+      url: raw.url as string | undefined,
+      apiKey: raw.apiKey as string | undefined,
+      envFile: raw.envFile as string | undefined,
+      os: raw.os as string | undefined,
+      target: raw.target as string | undefined,
+      toNano: Boolean(raw.toNano),
+      journald: raw.journald as boolean | undefined,
+      outDir: raw.outDir as string | undefined,
+      nonInteractive: Boolean(raw.nonInteractive),
+    };
+    try {
+      await runAddAgent(opts);
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+program
+  .command("add-aggregator")
+  .description("Generate the aggregator config: receives endpoint agents + syslog, ships to nano.")
+  .option("--url <baseUrl>", "nano base URL (defaults to your saved connection)")
+  .option("--api-key <key>", "nano API key (defaults to your saved connection)")
+  .option("--env-file <path>", "path to a nano install .env to read connection details from")
+  .option("--vector-host <host>", "nano Vector-native host (defaults to the nano URL's host)")
+  .option("--vector-port <port>", "nano Vector-native port (default 6000)")
+  .option("--agent-port <port>", "port endpoint agents ship to (default 9000)")
+  .option("--devices <ids>", "comma-separated syslog device ids to also listen for")
+  .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/aggregator)")
+  .option("--non-interactive", "skip prompts (no syslog devices unless --devices given)")
+  .action(async (raw: Record<string, unknown>) => {
+    const opts: AddAggregatorOptions = {
+      url: raw.url as string | undefined,
+      apiKey: raw.apiKey as string | undefined,
+      envFile: raw.envFile as string | undefined,
+      vectorHost: raw.vectorHost as string | undefined,
+      vectorPort: raw.vectorPort as string | undefined,
+      agentPort: raw.agentPort as string | undefined,
+      devices: raw.devices as string | undefined,
+      outDir: raw.outDir as string | undefined,
+      nonInteractive: Boolean(raw.nonInteractive),
+    };
+    try {
+      await runAddAggregator(opts);
     } catch (err) {
       fail(err);
     }
