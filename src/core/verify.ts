@@ -49,19 +49,30 @@ export async function verifyMarker(
   return { arrived: false, count: 0, attempts };
 }
 
+/** A sampled count of events for a source_type — `capped` means there were at least `count`. */
+export interface RecentCount {
+  count: number;
+  capped: boolean;
+}
+
+const COUNT_SAMPLE_LIMIT = 100;
+
 /**
- * Count events of a given source_type in the recent window — used to report on a real
- * collector after it's wired up (not just the synthetic test event).
+ * Sample events of a given source_type in the recent window — used to report on a real collector
+ * after it's wired up. Note: nano's search `total_count` tracks the returned page size, not the
+ * true match total, and `limit: 0` reports zero — so we page a sample and report "N+" when full
+ * rather than trusting total_count or asking for zero rows.
  */
 export async function countRecent(
   client: NanoClient,
   sourceType: string,
   windowMinutes = 10,
-): Promise<number> {
+): Promise<RecentCount> {
   const start = new Date(Date.now() - windowMinutes * 60_000).toISOString();
   const end = new Date(Date.now() + 60_000).toISOString();
-  const res = await client.search(`source_type="${sourceType}"`, start, end, 0);
-  return res.total_count;
+  const res = await client.search(`source_type="${sourceType}"`, start, end, COUNT_SAMPLE_LIMIT);
+  const count = res.results.length;
+  return { count, capped: count >= COUNT_SAMPLE_LIMIT };
 }
 
 function sleep(ms: number): Promise<void> {
