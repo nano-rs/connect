@@ -32,7 +32,7 @@ export function resolveSavedConnection(opts: ConnectionInputs): ResolvedConnecti
   return {
     baseUrl: normalizeBaseUrl(raw),
     apiKey: opts.apiKey ?? profile.apiKey,
-    searchUrl: opts.searchUrl,
+    searchUrl: opts.searchUrl ?? profile.searchUrl,
     ingestToken: opts.ingestToken ?? env?.ingestToken ?? profile.ingestToken,
   };
 }

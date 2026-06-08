@@ -15,6 +15,12 @@ export interface SyslogPlan {
 
 const VECTOR_DATA_DIR = "/var/lib/vector";
 
+/** Bracket a bare IPv6 host so `host:port` stays unambiguous in a Vector address. */
+function formatAddress(host: string, port: number): string {
+  const h = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `${h}:${port}`;
+}
+
 /** One device's source + source_type-stamping transform. */
 function deviceBlock(d: DeviceType): string {
   return `[sources.${d.id}]
@@ -87,7 +93,7 @@ ${catalog}
 [sinks.nano]
 type = "vector"
 inputs = ["*_tag"]
-address = "${plan.nanoHost}:${plan.nanoPort}"
+address = "${formatAddress(plan.nanoHost, plan.nanoPort)}"
 # Syslog sources can't honor end-to-end acknowledgements (UDP is fire-and-forget), so we leave
 # them off and rely on the disk buffer below for durability across collector restarts.
 acknowledgements.enabled = false
@@ -111,9 +117,15 @@ address = "0.0.0.0:9598"
 }
 
 export function buildDockerCompose(plan: SyslogPlan): string {
-  const ports = plan.selected
-    .map((d) => `      - "${d.port}:${d.port}/${d.mode}"`)
-    .join("\n");
+  const selectedIds = new Set(plan.selected.map((d) => d.id));
+  // List every catalog port; comment the ones not enabled so uncommenting stays symmetric with
+  // vector.toml (enable a device there -> uncomment its port here -> re-run).
+  const ports = SYSLOG_CATALOG.map((d) => {
+    const line = `"${d.port}:${d.port}/${d.mode}"`;
+    return selectedIds.has(d.id)
+      ? `      - ${line}`
+      : `      # - ${line}   # ${d.id}`;
+  }).join("\n");
 
   return `# Run the nano edge collector as a container.
 #   docker compose up -d
@@ -128,8 +140,8 @@ services:
       - ./vector.toml:/etc/vector/vector.toml:ro
       - nano-collector-data:${VECTOR_DATA_DIR}
     ports:
-${ports || '      # - "5514:5514/udp"   # enable a device in vector.toml, then expose its port here'}
-      - "9598:9598"
+${ports}
+      - "9598:9598"   # local metrics
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9598/metrics"]
       interval: 15s

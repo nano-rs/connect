@@ -43,7 +43,7 @@ export async function runVerify(opts: VerifyOptions): Promise<void> {
     throw new NanoApiError(`Invalid --window: ${opts.window}`);
   }
 
-  const client = new NanoClient(conn.baseUrl, { apiKey: conn.apiKey, searchUrl: opts.searchUrl });
+  const client = new NanoClient(conn.baseUrl, { apiKey: conn.apiKey, searchUrl: conn.searchUrl });
 
   intro(pc.inverse(" nano connect · verify "));
   const s = spinner();

@@ -12,6 +12,8 @@ export interface Profile {
   baseUrl?: string;
   apiKey?: string;
   ingestToken?: string;
+  /** Saved search-endpoint override for split deployments. */
+  searchUrl?: string;
 }
 
 function configDir(): string {

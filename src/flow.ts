@@ -113,7 +113,7 @@ export async function runConnect(opts: ConnectOptions): Promise<void> {
       hint: "Self-hosted: it's in your nano install's .env. SaaS: from your nano admin console.",
     }));
 
-  saveProfile({ baseUrl, apiKey, ingestToken });
+  saveProfile({ baseUrl, apiKey, ingestToken, searchUrl: opts.searchUrl });
 
   // 5. Prove the full path works end-to-end with a synthetic event.
   const ingestEndpoint = opts.ingestUrl ?? ingestUrl(baseUrl);

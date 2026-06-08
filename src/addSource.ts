@@ -22,8 +22,12 @@ export interface AddSourceOptions {
   vectorHost?: string;
   vectorPort?: string;
   outDir?: string;
+  /** Comma-separated device ids to enable (lets non-interactive runs be precise). */
+  devices?: string;
   nonInteractive?: boolean;
 }
+
+const HOST_RE = /^[A-Za-z0-9._\-:[\]]+$/;
 
 const DEFAULT_VECTOR_PORT = 6000;
 const DEFAULT_BUFFER_BYTES = 536_870_912; // 512 MB
@@ -38,8 +42,20 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
 
   // Which devices to enable now (the rest ship commented-out for later).
   let selectedIds: string[];
-  if (opts.nonInteractive) {
-    selectedIds = SYSLOG_CATALOG.map((d) => d.id); // can't prompt — enable all, operator prunes
+  if (opts.devices !== undefined) {
+    selectedIds = opts.devices.split(",").map((s) => s.trim()).filter(Boolean);
+    const known = new Set(SYSLOG_CATALOG.map((d) => d.id));
+    const unknown = selectedIds.filter((id) => !known.has(id));
+    if (unknown.length) {
+      throw new NanoApiError(
+        `Unknown device id(s): ${unknown.join(", ")}. Known: ${SYSLOG_CATALOG.map((d) => d.id).join(", ")}`,
+      );
+    }
+  } else if (opts.nonInteractive) {
+    selectedIds = SYSLOG_CATALOG.map((d) => d.id);
+    log.warn(
+      `Non-interactive with no --devices: enabling ALL ${SYSLOG_CATALOG.length} device types and opening their ports. Pass --devices a,b to narrow.`,
+    );
   } else {
     selectedIds = orExit(
       await multiselect({
@@ -53,11 +69,15 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
       }),
     ) as string[];
   }
+  // Preserve catalog order regardless of how ids were supplied.
   const selected = SYSLOG_CATALOG.filter((d) => selectedIds.includes(d.id));
 
-  // nano's Vector-native target.
-  const nanoHost =
-    opts.vectorHost ?? new URL(conn.baseUrl).hostname;
+  // nano's Vector-native target. URL-derived hostname is already sanitized; a raw --vector-host
+  // is interpolated into the generated TOML, so validate it can't break out of the string.
+  if (opts.vectorHost !== undefined && !HOST_RE.test(opts.vectorHost)) {
+    throw new NanoApiError(`Invalid --vector-host "${opts.vectorHost}" (expected a hostname or IP).`);
+  }
+  const nanoHost = opts.vectorHost ?? new URL(conn.baseUrl).hostname;
   const nanoPort = Number(opts.vectorPort ?? DEFAULT_VECTOR_PORT);
   if (!Number.isInteger(nanoPort) || nanoPort <= 0 || nanoPort > 65535) {
     throw new NanoApiError(`Invalid Vector port: ${opts.vectorPort}`);

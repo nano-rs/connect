@@ -60,8 +60,9 @@ program
   .option("--env-file <path>", "path to a nano install .env to read connection details from")
   .option("--vector-host <host>", "nano Vector-native host (defaults to the nano URL's host)")
   .option("--vector-port <port>", "nano Vector-native port (default 6000)")
+  .option("--devices <ids>", "comma-separated device ids to enable (e.g. cisco_asa,fortinet_fortigate)")
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/syslog)")
-  .option("--non-interactive", "enable all catalog devices instead of prompting")
+  .option("--non-interactive", "with no --devices, enable all catalog devices instead of prompting")
   .action(async (raw: Record<string, unknown>) => {
     const opts: AddSourceOptions = {
       url: raw.url as string | undefined,
@@ -69,6 +70,7 @@ program
       envFile: raw.envFile as string | undefined,
       vectorHost: raw.vectorHost as string | undefined,
       vectorPort: raw.vectorPort as string | undefined,
+      devices: raw.devices as string | undefined,
       outDir: raw.outDir as string | undefined,
       nonInteractive: Boolean(raw.nonInteractive),
     };
