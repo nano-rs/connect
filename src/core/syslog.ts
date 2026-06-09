@@ -2,6 +2,9 @@ import type { DeviceType } from "./catalog.js";
 import { SYSLOG_CATALOG } from "./catalog.js";
 import { commentOut, metricsSection, type Target, VECTOR_DATA_DIR, vectorSink } from "./vector.js";
 
+/** Container name for the syslog collector — shared by the compose file and the deploy step. */
+export const COLLECTOR_CONTAINER = "nano-collector";
+
 export interface SyslogPlan {
   /** Devices the operator chose to enable now (rendered active). */
   selected: DeviceType[];
@@ -118,7 +121,7 @@ export function buildDockerCompose(plan: SyslogPlan): string {
 services:
   nano-collector:
     image: ${plan.image}
-    container_name: nano-collector
+    container_name: ${COLLECTOR_CONTAINER}
     restart: unless-stopped
     command: ["--config", "/etc/vector/vector.toml"]
     volumes:

@@ -1,6 +1,7 @@
 import { intro, log, multiselect, note, outro, spinner } from "@clack/prompts";
 import pc from "picocolors";
 import {
+  AGGREGATOR_CONTAINER,
   buildAggregatorCompose,
   buildAggregatorReadme,
   buildAggregatorToml,
@@ -87,7 +88,7 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
   });
   s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
 
-  await maybeRunHere({ dir, container: "nano-aggregator", run: opts.run, nonInteractive: opts.nonInteractive });
+  await maybeRunHere({ dir, container: AGGREGATOR_CONTAINER, run: opts.run, nonInteractive: opts.nonInteractive });
 
   note(
     [

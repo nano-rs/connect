@@ -45,7 +45,9 @@ export async function maybeRunHere(opts: RunHereOptions): Promise<void> {
   const health = await waitHealthy(opts.container);
   if (health === "healthy" || health === "no-healthcheck") {
     log.success(pc.green(`${opts.container} is running.`));
+  } else if (health === "missing") {
+    log.warn(`Started, but couldn't find a container named ${opts.container} to health-check. Inspect: docker compose -f ${opts.dir}/docker-compose.yml ps`);
   } else {
-    log.warn(`${opts.container} started but health is "${health}". Inspect with: docker logs ${opts.container}`);
+    log.warn(`${opts.container} started but health is "${health}" after waiting. Inspect: docker logs ${opts.container}`);
   }
 }

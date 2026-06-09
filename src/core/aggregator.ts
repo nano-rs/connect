@@ -3,6 +3,9 @@ import { SYSLOG_CATALOG } from "./catalog.js";
 import { renderSyslogDevices } from "./syslog.js";
 import { metricsSection, type Target, VECTOR_DATA_DIR, vectorSink } from "./vector.js";
 
+/** Container name for the aggregator — shared by the compose file and the deploy step. */
+export const AGGREGATOR_CONTAINER = "nano-aggregator";
+
 export interface AggregatorPlan {
   /** Port endpoint agents ship to (Vector-native source). */
   agentPort: number;
@@ -78,7 +81,7 @@ export function buildAggregatorCompose(plan: AggregatorPlan): string {
 services:
   nano-aggregator:
     image: ${plan.image}
-    container_name: nano-aggregator
+    container_name: ${AGGREGATOR_CONTAINER}
     restart: unless-stopped
     command: ["--config", "/etc/vector/vector.toml"]
     volumes:

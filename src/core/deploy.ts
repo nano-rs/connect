@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { join } from "node:path";
+import { resolve } from "node:path";
 
 interface RunResult {
   code: number;
@@ -44,19 +44,23 @@ export async function dockerAvailable(): Promise<DockerStatus> {
   return { ok: true };
 }
 
-/** `docker compose pull` then `up -d` in `dir`, with progress shown to the user. */
+/**
+ * `docker compose pull` then `up -d`, with progress shown to the user. Uses an absolute -f path
+ * and no cwd: compose takes the file's directory as the project dir, so the `./vector.toml`
+ * volume still resolves. (Passing both cwd:dir AND a relative -f double-resolves the path.)
+ */
 export async function composeUp(dir: string): Promise<number> {
-  const file = join(dir, "docker-compose.yml");
-  const pull = await runInherit("docker", ["compose", "-f", file, "pull"], dir);
+  const file = resolve(dir, "docker-compose.yml");
+  const pull = await runInherit("docker", ["compose", "-f", file, "pull"]);
   if (pull !== 0) return pull;
-  return runInherit("docker", ["compose", "-f", file, "up", "-d"], dir);
+  return runInherit("docker", ["compose", "-f", file, "up", "-d"]);
 }
 
 /**
  * Poll a container's healthcheck until it reports healthy (or we give up). Returns the final
  * state: "healthy", "unhealthy", "starting", "no-healthcheck", or "missing".
  */
-export async function waitHealthy(container: string, timeoutMs = 45_000): Promise<string> {
+export async function waitHealthy(container: string, timeoutMs = 90_000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   let last = "missing";
   while (Date.now() < deadline) {

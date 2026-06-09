@@ -9,6 +9,7 @@ import {
   buildReadme,
   buildSystemdUnit,
   buildVectorToml,
+  COLLECTOR_CONTAINER,
   type SyslogPlan,
 } from "./core/syslog.js";
 import { NanoApiError } from "./core/types.js";
@@ -118,7 +119,7 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
   }
 
   // Offer to pull the image and start it right here.
-  await maybeRunHere({ dir, container: "nano-collector", run: opts.run, nonInteractive: opts.nonInteractive });
+  await maybeRunHere({ dir, container: COLLECTOR_CONTAINER, run: opts.run, nonInteractive: opts.nonInteractive });
 
   note(
     [
