@@ -4,6 +4,9 @@
   "description": "Onboard a data source into nano — set up an edge Vector collector and verify your logs are flowing.",
   "license": "Apache-2.0",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "connect": "dist/index.js"
   },
