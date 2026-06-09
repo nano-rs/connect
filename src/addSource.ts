@@ -13,6 +13,7 @@ import {
 } from "./core/syslog.js";
 import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE } from "./core/vector.js";
+import { maybeRunHere } from "./runHere.js";
 import { orExit } from "./ui/ui.js";
 
 export interface AddSourceOptions {
@@ -25,6 +26,8 @@ export interface AddSourceOptions {
   outDir?: string;
   /** Comma-separated device ids to enable (lets non-interactive runs be precise). */
   devices?: string;
+  /** Pull the image and start the collector here after generating. */
+  run?: boolean;
   nonInteractive?: boolean;
 }
 
@@ -114,13 +117,16 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
     log.warn("No devices enabled — every listener is commented out. Uncomment what you need in vector.toml.");
   }
 
+  // Offer to pull the image and start it right here.
+  await maybeRunHere({ dir, container: "nano-collector", run: opts.run, nonInteractive: opts.nonInteractive });
+
   note(
     [
-      `1. Start it:        ${pc.cyan("cd " + dir + " && docker compose up -d")}`,
-      `2. Point devices    (table above) at this machine's IP`,
-      `3. Confirm flow:    ${pc.cyan("npx @nano-rs/connect verify --source " + (selected[0]?.sourceType ?? "<source_type>"))}`,
+      `• Point devices     (table above) at this machine's IP`,
+      `• Confirm flow:      ${pc.cyan("npx @nano-rs/connect verify --source " + (selected[0]?.sourceType ?? "<source_type>"))}`,
+      `• (Re)start/stop:    ${pc.cyan("docker compose up -d")} / ${pc.cyan("down")} in ${dir}`,
     ].join("\n"),
     "Next",
   );
-  outro(pc.green("Collector config ready."));
+  outro(pc.green("Collector ready."));
 }

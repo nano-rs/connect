@@ -126,9 +126,10 @@ services:
       - nano-collector-data:${VECTOR_DATA_DIR}
     ports:
 ${ports}
-      - "9598:9598"   # local metrics
+      # metrics (9598) stay internal for the healthcheck; uncomment to scrape from the host:
+      # - "9598:9598"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9598/metrics"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9598/metrics"]
       interval: 15s
       timeout: 5s
       retries: 3

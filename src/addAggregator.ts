@@ -12,6 +12,7 @@ import { resolveSavedConnection } from "./core/connection.js";
 import { unauthenticatedVectorWarning, validateHost, validatePort } from "./core/target.js";
 import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE } from "./core/vector.js";
+import { maybeRunHere } from "./runHere.js";
 import { orExit } from "./ui/ui.js";
 
 export interface AddAggregatorOptions {
@@ -23,6 +24,8 @@ export interface AddAggregatorOptions {
   agentPort?: string;
   devices?: string;
   outDir?: string;
+  /** Pull the image and start the aggregator here after generating. */
+  run?: boolean;
   nonInteractive?: boolean;
 }
 
@@ -84,13 +87,15 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
   });
   s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
 
+  await maybeRunHere({ dir, container: "nano-aggregator", run: opts.run, nonInteractive: opts.nonInteractive });
+
   note(
     [
-      `1. Start it:     ${pc.cyan("cd " + dir + " && docker compose up -d")}`,
-      `2. Point agents at ${pc.cyan(`<this-host>:${agentPort}`)} (add-agent --target <this-host>:${agentPort})`,
-      `3. Confirm:      ${pc.cyan("npx @nano-rs/connect verify --source windows_event")}`,
+      `• Point agents at ${pc.cyan(`<this-host>:${agentPort}`)} (add-agent --target <this-host>:${agentPort})`,
+      `• Confirm:        ${pc.cyan("npx @nano-rs/connect verify --source windows_event")}`,
+      `• (Re)start/stop: ${pc.cyan("docker compose up -d")} / ${pc.cyan("down")} in ${dir}`,
     ].join("\n"),
     "Next",
   );
-  outro(pc.green("Aggregator config ready."));
+  outro(pc.green("Aggregator ready."));
 }

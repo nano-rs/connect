@@ -64,6 +64,7 @@ program
   .option("--vector-port <port>", "nano Vector-native port (default 6000)")
   .option("--devices <ids>", "comma-separated device ids to enable (e.g. cisco_asa,fortinet_fortigate)")
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/syslog)")
+  .option("--run", "pull the image and start the collector here after generating")
   .option("--non-interactive", "with no --devices, enable all catalog devices instead of prompting")
   .action(async (raw: Record<string, unknown>) => {
     const opts: AddSourceOptions = {
@@ -74,6 +75,7 @@ program
       vectorPort: raw.vectorPort as string | undefined,
       devices: raw.devices as string | undefined,
       outDir: raw.outDir as string | undefined,
+      run: Boolean(raw.run),
       nonInteractive: Boolean(raw.nonInteractive),
     };
     try {
@@ -125,6 +127,7 @@ program
   .option("--agent-port <port>", "port endpoint agents ship to (default 9000)")
   .option("--devices <ids>", "comma-separated syslog device ids to also listen for")
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/aggregator)")
+  .option("--run", "pull the image and start the aggregator here after generating")
   .option("--non-interactive", "skip prompts (no syslog devices unless --devices given)")
   .action(async (raw: Record<string, unknown>) => {
     const opts: AddAggregatorOptions = {
@@ -136,6 +139,7 @@ program
       agentPort: raw.agentPort as string | undefined,
       devices: raw.devices as string | undefined,
       outDir: raw.outDir as string | undefined,
+      run: Boolean(raw.run),
       nonInteractive: Boolean(raw.nonInteractive),
     };
     try {
