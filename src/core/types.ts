@@ -67,21 +67,22 @@ export interface ParserRepository {
   parser_count?: number;
 }
 
-/** A parser available in a repository, with whether it's already imported. */
-export interface RepositoryParserResult {
-  parser: {
-    /** Nullable in the backend; repo parsers expose no match_values (aliases resolved at import). */
-    name?: string;
-    display_name?: string;
-    match_values?: string[] | null;
-    file_path: string;
-    category?: string;
-    vendor?: string;
-    /** "parser" or "enrichment" — only "parser" should be offered for log onboarding. */
-    kind?: string;
-  };
-  is_imported: boolean;
+/**
+ * A parser in a repository. The list endpoint returns these flat (not wrapped). `match_values` is
+ * null in the list response — aliases live in `raw_content` (YAML) and are resolved at import.
+ */
+export interface RepositoryParser {
+  id: string;
+  name?: string;
+  display_name?: string;
+  match_values?: string[] | null;
+  file_path: string;
+  /** "parser" or "enrichment" — only "parser" should be offered for log onboarding. */
+  kind?: string;
+  is_imported?: boolean;
   linked_log_source_id?: string | null;
+  /** The parser YAML; the only place alias match_values are available in the list response. */
+  raw_content?: string;
 }
 
 /** Result of POST /api/log-sources/{id}/deploy (HTTP 200 even when success is false). */

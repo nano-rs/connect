@@ -3,7 +3,7 @@ import {
   type LogSource,
   NanoApiError,
   type ParserRepository,
-  type RepositoryParserResult,
+  type RepositoryParser,
 } from "./types.js";
 
 export type ParserState = "deployed" | "available" | "none";
@@ -23,13 +23,32 @@ export interface ParserContext {
   ok: boolean;
   deployed: LogSource[];
   repoId?: string;
-  repoParsers: RepositoryParserResult[];
+  repoParsers: RepositoryParser[];
 }
 
 function matches(sourceType: string, name?: string, matchValues?: string[] | null): boolean {
   const st = sourceType.toLowerCase();
   if (name && name.toLowerCase() === st) return true;
   return (matchValues ?? []).some((m) => m.toLowerCase() === st);
+}
+
+/**
+ * All identifiers a repo parser routes on: its name plus the match_values aliases. The list
+ * endpoint leaves match_values null, so aliases are parsed out of the raw_content YAML
+ * (e.g. "match_values:\n  - cisco_asa\n  - asa").
+ */
+function repoMatchValues(p: RepositoryParser): string[] {
+  const vals: string[] = [];
+  if (p.name) vals.push(p.name);
+  if (p.match_values) vals.push(...p.match_values);
+  const block = p.raw_content?.match(/match_values:\s*\n((?:[ \t]*-[ \t]*[^\n]+\n?)+)/);
+  if (block?.[1]) {
+    for (const line of block[1].split("\n")) {
+      const v = line.replace(/^[ \t]*-[ \t]*/, "").trim().replace(/^["']|["']$/g, "");
+      if (v) vals.push(v);
+    }
+  }
+  return vals;
 }
 
 /** The official community repo (nano-rs/parsers) among configured repos, else the first enabled. */
@@ -67,14 +86,15 @@ export function classify(sourceType: string, ctx: ParserContext): ParserStatus {
   if (ctx.deployed.some((s) => s.deployed !== false && matches(sourceType, s.name, s.match_values))) {
     return { sourceType, state: "deployed" };
   }
-  // Repo parsers expose no match_values and may be enrichment-kind — match by name only, exactly
-  // (no substring: that false-positives, e.g. "linux" onto "linux_audit"), parsers only.
+  // Match against the repo parser's name + raw_content aliases (exact, no substring — that
+  // false-positives e.g. "linux" onto "linux_audit"). Parsers only, not enrichment normalizers.
+  const st = sourceType.toLowerCase();
   const hit = ctx.repoParsers.find(
-    (r) => r.parser.kind !== "enrichment" && matches(sourceType, r.parser.name, r.parser.match_values),
+    (r) => r.kind !== "enrichment" && repoMatchValues(r).some((v) => v.toLowerCase() === st),
   );
   if (hit) {
     if (hit.is_imported) return { sourceType, state: "deployed" };
-    return { sourceType, state: "available", repoId: ctx.repoId, filePath: hit.parser.file_path, parserName: hit.parser.name };
+    return { sourceType, state: "available", repoId: ctx.repoId, filePath: hit.file_path, parserName: hit.name };
   }
   return { sourceType, state: "none" };
 }

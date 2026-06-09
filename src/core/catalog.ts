@@ -24,14 +24,15 @@ export interface DeviceType {
 export const SYSLOG_CATALOG: DeviceType[] = [
   { id: "cisco_asa", label: "Cisco ASA / FTD firewall", sourceType: "cisco_asa", port: 5514, mode: "udp" },
   {
-    id: "paloalto_panos",
+    // source_type aligned to the community parser's canonical name (nano-rs/parsers: palo_alto).
+    id: "palo_alto",
     label: "Palo Alto PAN-OS firewall",
-    sourceType: "paloalto_panos",
+    sourceType: "palo_alto",
     port: 5515,
     mode: "tcp",
     note: "PAN-OS can emit UDP/TCP/TLS; this defaults to TCP. Switch mode if your firewall uses UDP.",
   },
-  { id: "fortinet_fortigate", label: "Fortinet FortiGate", sourceType: "fortinet_fortigate", port: 5516, mode: "udp" },
+  { id: "fortinet", label: "Fortinet FortiGate", sourceType: "fortinet", port: 5516, mode: "udp" },
   { id: "cisco_ios", label: "Cisco IOS switch / router", sourceType: "cisco_ios", port: 5517, mode: "udp" },
   { id: "juniper_srx", label: "Juniper SRX", sourceType: "juniper_srx", port: 5518, mode: "udp" },
   { id: "sonicwall", label: "SonicWall firewall", sourceType: "sonicwall", port: 5519, mode: "udp" },

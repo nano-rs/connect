@@ -6,7 +6,7 @@ import {
   type LogSource,
   NanoApiError,
   type ParserRepository,
-  type RepositoryParserResult,
+  type RepositoryParser,
   type SearchResponse,
   type SetupStatus,
 } from "./types.js";
@@ -125,9 +125,9 @@ export class NanoClient {
   }
 
   /** List parsers available in a repository, optionally filtered by a search term. */
-  async listRepositoryParsers(repoId: string, search?: string): Promise<RepositoryParserResult[]> {
+  async listRepositoryParsers(repoId: string, search?: string): Promise<RepositoryParser[]> {
     const q = search ? `?search=${encodeURIComponent(search)}` : "";
-    const res = await request<RepositoryParserResult[] | { parsers?: RepositoryParserResult[] }>(
+    const res = await request<RepositoryParser[] | { parsers?: RepositoryParser[] }>(
       `${apiBase(this.baseUrl)}/parser-repositories/${repoId}/parsers${q}`,
       { headers: this.authHeaders() },
     );
