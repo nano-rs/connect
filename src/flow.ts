@@ -290,13 +290,11 @@ async function runConnectivityCheck(
   s.start("Checking whether it's already searchable");
   const result = await verifyMarker(client, TEST_SOURCE_TYPE, marker, { timeoutMs: 12_000 });
   if (result.arrived) {
-    s.stop(pc.green(`Searchable already (${result.count} match) — ingest + parse + query all work`));
+    s.stop(pc.green(`Searchable already (${result.count} match) — ingest + query both work`));
   } else {
     s.stop(pc.green("Ingest path confirmed"));
     log.info(
-      `Your event reached ingestion (token + endpoint are correct). It's not searchable yet because ${pc.cyan(
-        TEST_SOURCE_TYPE,
-      )} has no parser — that's expected. Setting up a collector for a real source normalizes it, and I'll verify searchability then.`,
+      "Your event reached ingestion (token + endpoint are correct). It may take a moment to be searchable (Vector batches before flushing); a parser then normalizes it into UDM fields. Set up a collector for a real source next.",
     );
   }
 }

@@ -58,13 +58,13 @@ export async function runVerify(opts: VerifyOptions): Promise<void> {
 
   if (result.count > 0) {
     const shown = result.capped ? `${result.count}+` : `${result.count}`;
-    s.stop(pc.green(`${shown} ${source} event(s) searchable in the last ${windowMin}m — parsed into OCSF ✓`));
+    s.stop(pc.green(`${shown} ${source} event(s) searchable in the last ${windowMin}m — normalized ✓`));
   } else {
     s.stop(pc.yellow(`No searchable ${source} events in the last ${windowMin}m`));
     log.info(
-      `Either your devices aren't sending yet, or events are arriving but not parsed into OCSF (nano has no parser for ${pc.cyan(
+      `Either your devices aren't sending yet, or events are arriving but not yet normalized (no parser for ${pc.cyan(
         source,
-      )} yet). Check the collector is up and devices point at it; build a parser to normalize this source.`,
+      )}). Check the collector is up and devices point at it; deploy a parser to normalize this source into UDM fields.`,
     );
   }
   outro(pc.green("Done."));
