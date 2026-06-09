@@ -8,11 +8,13 @@ import {
   DEFAULT_WINDOWS_CHANNELS,
   type LinuxFileGroup,
 } from "./core/agent.js";
+import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
 import { resolveSavedConnection } from "./core/connection.js";
 import { ID_RE, parseHostPort } from "./core/target.js";
 import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE, type Target } from "./core/vector.js";
+import { reviewParsers } from "./reviewParsers.js";
 import { orExit } from "./ui/ui.js";
 
 export interface AddAgentOptions {
@@ -26,6 +28,8 @@ export interface AddAgentOptions {
   toNano?: boolean;
   journald?: boolean;
   outDir?: string;
+  /** Auto-deploy available community parsers without prompting. */
+  deployParsers?: boolean;
   nonInteractive?: boolean;
 }
 
@@ -65,6 +69,7 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
   s.start("Generating agent config");
 
   let paths: string[];
+  let sourceTypes: string[] = [];
   if (os === "windows") {
     paths = writeArtifacts(dir, {
       "vector.toml": buildWindowsAgentToml(
@@ -74,6 +79,7 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
       "install-agent.ps1": buildWindowsInstaller(),
       "README.md": windowsReadme(target, generatedAt),
     });
+    sourceTypes = ["windows_event", "windows_sysmon"];
     s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
     note(
       [
@@ -94,6 +100,10 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
       "nano-agent.service": buildLinuxAgentSystemd(),
       "README.md": linuxReadme(target, journald, files, generatedAt),
     });
+    sourceTypes = [
+      ...(journald ? ["linux_journald", "linux_sysmon"] : []),
+      ...files.map((f) => f.sourceType),
+    ];
     s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
     note(
       [
@@ -103,6 +113,14 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
       ].join("\n"),
       "Next",
     );
+  }
+
+  if (conn.apiKey) {
+    const client = new NanoClient(conn.baseUrl, { apiKey: conn.apiKey });
+    await reviewParsers(client, sourceTypes, {
+      deployParsers: opts.deployParsers,
+      nonInteractive: opts.nonInteractive,
+    });
   }
 
   outro(pc.green("Agent config ready."));

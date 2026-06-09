@@ -16,7 +16,7 @@ import { ingestUrl, isInsecureRemote, normalizeBaseUrl } from "./core/endpoints.
 import { findEnvFile } from "./core/env.js";
 import { sendTestEvent } from "./core/ingest.js";
 import { loadProfile, saveProfile } from "./core/profile.js";
-import { REQUIRED_SCOPES, SCOPE_DESCRIPTIONS } from "./core/scopes.js";
+import { ELEVATED_SCOPES, REQUIRED_SCOPES, SCOPE_DESCRIPTIONS } from "./core/scopes.js";
 import { NanoApiError } from "./core/types.js";
 import { verifyMarker } from "./core/verify.js";
 import { maskSecret, orExit } from "./ui/ui.js";
@@ -213,7 +213,9 @@ async function loginAndMint(client: NanoClient): Promise<string> {
   }
 
   note(
-    REQUIRED_SCOPES.map((scope) => `  ${pc.cyan(scope)} — ${SCOPE_DESCRIPTIONS[scope] ?? ""}`).join("\n"),
+    [...REQUIRED_SCOPES, ...ELEVATED_SCOPES]
+      .map((scope) => `  ${pc.cyan(scope)} — ${SCOPE_DESCRIPTIONS[scope] ?? ""}`)
+      .join("\n") + pc.dim("\n  (the last two are best-effort — skipped if your account can't grant them)"),
     "I'll create an API key named 'nano-connect' with these permissions",
   );
   const proceed = orExit(await confirm({ message: "Create this API key?" }));
@@ -222,12 +224,28 @@ async function loginAndMint(client: NanoClient): Promise<string> {
   }
 
   s.start("Creating API key");
+  // Try for the deploy-capable key; if the account can't grant those, fall back to read-only.
   try {
-    const created = await client.createApiKey(accessToken, "nano-connect", [...REQUIRED_SCOPES]);
+    const created = await client.createApiKey(accessToken, "nano-connect", [
+      ...REQUIRED_SCOPES,
+      ...ELEVATED_SCOPES,
+    ]);
     s.stop(pc.green(`Created API key ${pc.dim(created.key_prefix + "…")}`));
     log.info(`Stored key ${pc.dim(maskSecret(created.key))} in your local profile.`);
     return created.key;
   } catch (err) {
+    if (err instanceof NanoApiError && err.status === 403) {
+      try {
+        const created = await client.createApiKey(accessToken, "nano-connect", [...REQUIRED_SCOPES]);
+        s.stop(pc.green(`Created API key ${pc.dim(created.key_prefix + "…")}`));
+        log.info(
+          `Stored a read-only key ${pc.dim(maskSecret(created.key))} (your account can't grant parser-deploy permissions, so the CLI will point you to the platform for that).`,
+        );
+        return created.key;
+      } catch {
+        // fall through to the error below
+      }
+    }
     s.stop(pc.red("Could not create API key"));
     if (err instanceof NanoApiError && err.status === 403) {
       log.error(

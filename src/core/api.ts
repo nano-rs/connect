@@ -2,7 +2,11 @@ import { apiBase, healthUrl } from "./endpoints.js";
 import {
   type ApiKeyCreated,
   type AuthResponse,
+  type DeploymentResult,
+  type LogSource,
   NanoApiError,
+  type ParserRepository,
+  type RepositoryParserResult,
   type SearchResponse,
   type SetupStatus,
 } from "./types.js";
@@ -110,6 +114,57 @@ export class NanoClient {
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({ name, permissions }),
+    });
+  }
+
+  /** List deployed log sources (parsers) on the instance. */
+  async listLogSources(): Promise<LogSource[]> {
+    const res = await request<LogSource[] | { log_sources?: LogSource[]; sources?: LogSource[] }>(
+      `${apiBase(this.baseUrl)}/log-sources`,
+      { headers: this.authHeaders() },
+    );
+    return Array.isArray(res) ? res : (res.log_sources ?? res.sources ?? []);
+  }
+
+  /** List configured parser repositories (e.g. the official nano-rs/parsers). */
+  async listParserRepositories(): Promise<ParserRepository[]> {
+    const res = await request<ParserRepository[] | { repositories?: ParserRepository[] }>(
+      `${apiBase(this.baseUrl)}/parser-repositories`,
+      { headers: this.authHeaders() },
+    );
+    return Array.isArray(res) ? res : (res.repositories ?? []);
+  }
+
+  /** List parsers available in a repository, optionally filtered by a search term. */
+  async listRepositoryParsers(repoId: string, search?: string): Promise<RepositoryParserResult[]> {
+    const q = search ? `?search=${encodeURIComponent(search)}` : "";
+    const res = await request<RepositoryParserResult[] | { parsers?: RepositoryParserResult[] }>(
+      `${apiBase(this.baseUrl)}/parser-repositories/${repoId}/parsers${q}`,
+      { headers: this.authHeaders() },
+    );
+    return Array.isArray(res) ? res : (res.parsers ?? []);
+  }
+
+  /** Import a repository parser as a (draft) log source. Returns the new log source id. */
+  async importParser(repoId: string, filePath: string): Promise<string> {
+    // {path} is an axum catch-all: encode each segment (handles #/?/spaces) but keep the slashes.
+    const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
+    const res = await request<{ log_source_id: string }>(
+      `${apiBase(this.baseUrl)}/parser-repositories/${repoId}/parsers/import/${encodedPath}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...this.authHeaders() },
+        body: JSON.stringify({ import_type: "linked", ingestion_method: "routed" }),
+      },
+    );
+    return res.log_source_id;
+  }
+
+  /** Deploy a log source to Vector. Returns the result — note the API returns 200 even on failure. */
+  async deployLogSource(id: string): Promise<DeploymentResult> {
+    return request<DeploymentResult>(`${apiBase(this.baseUrl)}/log-sources/${id}/deploy`, {
+      method: "POST",
+      headers: this.authHeaders(),
     });
   }
 

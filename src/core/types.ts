@@ -49,6 +49,47 @@ export interface SearchResponse {
   execution_time_ms: number;
 }
 
+/** A deployed log source (parser) on the instance. */
+export interface LogSource {
+  id: string;
+  name: string;
+  match_values?: string[] | null;
+  deployed?: boolean;
+  status?: string;
+}
+
+/** A configured parser repository (e.g. the official nano-rs/parsers). */
+export interface ParserRepository {
+  id: string;
+  name: string;
+  url?: string;
+  enabled?: boolean;
+  parser_count?: number;
+}
+
+/** A parser available in a repository, with whether it's already imported. */
+export interface RepositoryParserResult {
+  parser: {
+    /** Nullable in the backend; repo parsers expose no match_values (aliases resolved at import). */
+    name?: string;
+    display_name?: string;
+    match_values?: string[] | null;
+    file_path: string;
+    category?: string;
+    vendor?: string;
+    /** "parser" or "enrichment" — only "parser" should be offered for log onboarding. */
+    kind?: string;
+  };
+  is_imported: boolean;
+  linked_log_source_id?: string | null;
+}
+
+/** Result of POST /api/log-sources/{id}/deploy (HTTP 200 even when success is false). */
+export interface DeploymentResult {
+  success: boolean;
+  message?: string;
+}
+
 /** A nano API error surfaced to the user. */
 export class NanoApiError extends Error {
   constructor(

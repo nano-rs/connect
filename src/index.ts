@@ -65,6 +65,7 @@ program
   .option("--devices <ids>", "comma-separated device ids to enable (e.g. cisco_asa,fortinet_fortigate)")
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/syslog)")
   .option("--run", "pull the image and start the collector here after generating")
+  .option("--deploy-parsers", "auto-deploy available community parsers for your sources")
   .option("--non-interactive", "with no --devices, enable all catalog devices instead of prompting")
   .action(async (raw: Record<string, unknown>) => {
     const opts: AddSourceOptions = {
@@ -76,6 +77,7 @@ program
       devices: raw.devices as string | undefined,
       outDir: raw.outDir as string | undefined,
       run: Boolean(raw.run),
+      deployParsers: Boolean(raw.deployParsers),
       nonInteractive: Boolean(raw.nonInteractive),
     };
     try {
@@ -96,6 +98,7 @@ program
   .option("--to-nano", "ship straight to nano (:6000) instead of an aggregator")
   .option("--no-journald", "(linux) don't collect journald")
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/agent-<os>)")
+  .option("--deploy-parsers", "auto-deploy available community parsers for this agent's sources")
   .option("--non-interactive", "fail instead of prompting when a required value is missing")
   .action(async (raw: Record<string, unknown>) => {
     const opts: AddAgentOptions = {
@@ -107,6 +110,7 @@ program
       toNano: Boolean(raw.toNano),
       journald: raw.journald as boolean | undefined,
       outDir: raw.outDir as string | undefined,
+      deployParsers: Boolean(raw.deployParsers),
       nonInteractive: Boolean(raw.nonInteractive),
     };
     try {
@@ -128,6 +132,7 @@ program
   .option("--devices <ids>", "comma-separated syslog device ids to also listen for")
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/aggregator)")
   .option("--run", "pull the image and start the aggregator here after generating")
+  .option("--deploy-parsers", "auto-deploy available community parsers for the syslog sources")
   .option("--non-interactive", "skip prompts (no syslog devices unless --devices given)")
   .action(async (raw: Record<string, unknown>) => {
     const opts: AddAggregatorOptions = {
@@ -140,6 +145,7 @@ program
       devices: raw.devices as string | undefined,
       outDir: raw.outDir as string | undefined,
       run: Boolean(raw.run),
+      deployParsers: Boolean(raw.deployParsers),
       nonInteractive: Boolean(raw.nonInteractive),
     };
     try {

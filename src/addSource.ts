@@ -1,5 +1,6 @@
 import { intro, log, multiselect, note, outro, spinner, text } from "@clack/prompts";
 import pc from "picocolors";
+import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
 import { SYSLOG_CATALOG } from "./core/catalog.js";
 import { resolveSavedConnection } from "./core/connection.js";
@@ -15,6 +16,7 @@ import {
 import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE } from "./core/vector.js";
 import { maybeRunHere } from "./runHere.js";
+import { reviewParsers } from "./reviewParsers.js";
 import { orExit } from "./ui/ui.js";
 
 export interface AddSourceOptions {
@@ -29,6 +31,8 @@ export interface AddSourceOptions {
   devices?: string;
   /** Pull the image and start the collector here after generating. */
   run?: boolean;
+  /** Auto-deploy available community parsers without prompting. */
+  deployParsers?: boolean;
   nonInteractive?: boolean;
 }
 
@@ -116,6 +120,15 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
     );
   } else {
     log.warn("No devices enabled — every listener is commented out. Uncomment what you need in vector.toml.");
+  }
+
+  // Tell them which source_types nano already parses / offer to deploy a community parser.
+  if (conn.apiKey) {
+    const client = new NanoClient(conn.baseUrl, { apiKey: conn.apiKey, searchUrl: conn.searchUrl });
+    await reviewParsers(client, selected.map((d) => d.sourceType), {
+      deployParsers: opts.deployParsers,
+      nonInteractive: opts.nonInteractive,
+    });
   }
 
   // Offer to pull the image and start it right here.

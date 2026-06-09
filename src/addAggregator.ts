@@ -7,6 +7,7 @@ import {
   buildAggregatorToml,
   type AggregatorPlan,
 } from "./core/aggregator.js";
+import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
 import { SYSLOG_CATALOG } from "./core/catalog.js";
 import { resolveSavedConnection } from "./core/connection.js";
@@ -14,6 +15,7 @@ import { unauthenticatedVectorWarning, validateHost, validatePort } from "./core
 import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE } from "./core/vector.js";
 import { maybeRunHere } from "./runHere.js";
+import { reviewParsers } from "./reviewParsers.js";
 import { orExit } from "./ui/ui.js";
 
 export interface AddAggregatorOptions {
@@ -27,6 +29,8 @@ export interface AddAggregatorOptions {
   outDir?: string;
   /** Pull the image and start the aggregator here after generating. */
   run?: boolean;
+  /** Auto-deploy available community parsers without prompting. */
+  deployParsers?: boolean;
   nonInteractive?: boolean;
 }
 
@@ -87,6 +91,14 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
     "README.md": buildAggregatorReadme(plan, generatedAt),
   });
   s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
+
+  if (conn.apiKey && syslogSelected.length > 0) {
+    const client = new NanoClient(conn.baseUrl, { apiKey: conn.apiKey });
+    await reviewParsers(client, syslogSelected.map((d) => d.sourceType), {
+      deployParsers: opts.deployParsers,
+      nonInteractive: opts.nonInteractive,
+    });
+  }
 
   await maybeRunHere({ dir, container: AGGREGATOR_CONTAINER, run: opts.run, nonInteractive: opts.nonInteractive });
 
