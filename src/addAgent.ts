@@ -186,5 +186,9 @@ Collecting: ${collecting}.
 1. Copy this folder to the Linux endpoint.
 2. Install per the header of \`nano-agent.service\` (runs as root to read /var/log + journald).
 3. Verify: \`npx @nano-rs/connect verify --source linux_journald\`.
+
+If [Sysmon for Linux](https://github.com/microsoft/SysmonForLinux) is installed, its events are
+auto-tagged \`linux_sysmon\` (split out from journald by identifier) — verify with
+\`npx @nano-rs/connect verify --source linux_sysmon\`.
 `;
 }

@@ -139,7 +139,16 @@ type = "journald"
 type = "remap"
 inputs = ["journald"]
 source = '''
-.source_type = "linux_journald"
+# Sysmon for Linux logs to journald under identifier/unit "sysmon". Tag those linux_sysmon (its
+# own parser, like Windows Sysmon); everything else is linux_journald. Works automatically if
+# sysmonforlinux is installed — no toggle needed.
+ident = downcase(string(.SYSLOG_IDENTIFIER) ?? "")
+unit = downcase(string(._SYSTEMD_UNIT) ?? "")
+source_type = "linux_journald"
+if contains(ident, "sysmon") || contains(unit, "sysmon") {
+    source_type = "linux_sysmon"
+}
+.source_type = source_type
 .src_host = get_hostname!()
 '''`);
   }
