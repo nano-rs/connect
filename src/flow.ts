@@ -12,7 +12,7 @@ import {
 } from "@clack/prompts";
 import pc from "picocolors";
 import { NanoClient } from "./core/api.js";
-import { ingestUrl, isInsecureRemote, normalizeBaseUrl } from "./core/endpoints.js";
+import { ingestCandidates, isInsecureRemote, normalizeBaseUrl } from "./core/endpoints.js";
 import { findEnvFile } from "./core/env.js";
 import { sendTestEvent } from "./core/ingest.js";
 import { loadProfile, saveProfile } from "./core/profile.js";
@@ -75,22 +75,19 @@ export async function runConnect(opts: ConnectOptions): Promise<void> {
 
   const client = new NanoClient(baseUrl, { searchUrl: opts.searchUrl });
 
-  // 2. Connectivity
+  // 2. Connectivity — probe /api/setup/status: it's a stable JSON endpoint under /api on BOTH
+  // the nginx-fronted layout (where /health serves the SPA) and the split-port dev layout.
   const s = spinner();
   s.start(`Reaching ${baseUrl}`);
-  const healthy = await client.health();
-  if (!healthy) {
-    s.stop(pc.red(`Could not reach ${baseUrl}/health`));
-    log.error(
-      "nano didn't answer its health check. Check the URL, that the stack is up, and that you can reach it from here.",
-    );
-    process.exit(1);
-  }
   let initialized = true;
   try {
     initialized = (await client.setupStatus()).initialized;
   } catch {
-    // setup/status is best-effort; don't block on it.
+    s.stop(pc.red(`Could not reach ${baseUrl}`));
+    log.error(
+      "nano didn't respond at /api. Check the URL, that the stack is up, and that you can reach it from here.",
+    );
+    process.exit(1);
   }
   s.stop(pc.green(`Connected to ${baseUrl}`));
   if (!initialized) {
@@ -116,13 +113,15 @@ export async function runConnect(opts: ConnectOptions): Promise<void> {
   saveProfile({ baseUrl, apiKey, ingestToken, searchUrl: opts.searchUrl });
 
   // 5. Prove the full path works end-to-end with a synthetic event.
-  const ingestEndpoint = opts.ingestUrl ?? ingestUrl(baseUrl);
-  await runConnectivityCheck(client, ingestEndpoint, ingestToken, opts);
+  const ingestEndpoints = ingestCandidates(baseUrl, opts.ingestUrl);
+  await runConnectivityCheck(client, ingestEndpoints, ingestToken, opts);
 
   note(
     [
-      "Connection verified and saved. Next:",
-      `  ${pc.cyan("connect")} will help you set up a collector (syslog / Windows / files) — coming next.`,
+      "Connection verified and saved. Next — set up a collector:",
+      `  ${pc.cyan("connect add-source")}      syslog from network devices`,
+      `  ${pc.cyan("connect add-agent")}       Windows Event Log / Linux journald + files`,
+      `  ${pc.cyan("connect add-aggregator")}  a pool that fans endpoints into nano`,
     ].join("\n"),
     "What's next",
   );
@@ -259,7 +258,7 @@ async function loginAndMint(client: NanoClient): Promise<string> {
 /** Send a synthetic event and confirm it becomes searchable — the end-to-end smoke test. */
 async function runConnectivityCheck(
   client: NanoClient,
-  ingestEndpoint: string,
+  ingestEndpoints: string[],
   ingestToken: string,
   opts: ConnectOptions,
 ): Promise<void> {
@@ -277,8 +276,9 @@ async function runConnectivityCheck(
   s.start("Sending a test event");
   let marker: string;
   try {
-    ({ marker } = await sendTestEvent(ingestEndpoint, ingestToken, TEST_SOURCE_TYPE));
-    s.stop(pc.green("Test event accepted by the ingest endpoint"));
+    const sent = await sendTestEvent(ingestEndpoints, ingestToken, TEST_SOURCE_TYPE);
+    marker = sent.marker;
+    s.stop(pc.green(`Test event accepted by ${sent.endpoint}`));
   } catch (err) {
     s.stop(pc.red("Ingest failed"));
     throw err;

@@ -48,17 +48,31 @@ export function apiBase(baseUrl: string): string {
   return `${baseUrl}/api`;
 }
 
-/** Public health endpoint (no /api prefix), e.g. https://nano.example.com/health */
-export function healthUrl(baseUrl: string): string {
-  return `${baseUrl}/health`;
-}
-
 /**
- * External ingest URL a collector POSTs logs to.
- *
- * Self-hosted (install.sh / docker-compose) fronts Vector with nginx at `/ingest`. SaaS "hobby"
- * tenants use a different host-shaped path; that's handled later when we know the tenant shape.
+ * Candidate HTTP ingest endpoints to try, in order. Real deployments differ:
+ *   - cheaper SaaS: `/ingest` on the base domain          → baseUrl/ingest
+ *   - dedicated SaaS: a separate Vector host              → https://ingest-<sub>.<domain>
+ *   - open-core (docker-compose.opensource.yml): direct  → host:8080
+ * An explicit override short-circuits the list; the spine probes the rest and uses the first that
+ * accepts an event.
  */
-export function ingestUrl(baseUrl: string): string {
-  return `${baseUrl}/ingest`;
+export function ingestCandidates(baseUrl: string, explicit?: string): string[] {
+  if (explicit) return [explicit];
+  const candidates = [`${baseUrl}/ingest`];
+  try {
+    const u = new URL(baseUrl);
+    const host = u.hostname;
+    const isIp = /^\d+(\.\d+){3}$/.test(host) || host.includes(":");
+    const labels = host.split(".");
+    // Dedicated ingest host: acme.nano.rs -> ingest-acme.nano.rs (only for real subdomains).
+    if (!isIp && labels.length >= 3) {
+      const dedicated = host.replace(/^[^.]+/, (first) => `ingest-${first}`);
+      candidates.push(`${u.protocol}//${dedicated}`);
+    }
+    // Open-core direct Vector port.
+    candidates.push(`${u.protocol}//${host}:8080/`);
+  } catch {
+    /* baseUrl already normalized; the /ingest candidate stands */
+  }
+  return candidates;
 }

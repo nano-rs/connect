@@ -1,4 +1,4 @@
-import { apiBase, healthUrl } from "./endpoints.js";
+import { apiBase } from "./endpoints.js";
 import {
   type ApiKeyCreated,
   type AuthResponse,
@@ -74,18 +74,7 @@ export class NanoClient {
     return { "X-API-Key": this.apiKey };
   }
 
-  /** Public liveness check. Returns true if the instance answers with status "ok". */
-  async health(): Promise<boolean> {
-    try {
-      const res = await request<{ status: string }>(healthUrl(this.baseUrl), {
-        timeoutMs: 8_000,
-      });
-      return res.status === "ok";
-    } catch {
-      return false;
-    }
-  }
-
+  /** Liveness + setup probe. Works on both the nginx-fronted and split-port layouts. */
   async setupStatus(): Promise<SetupStatus> {
     return request<SetupStatus>(`${apiBase(this.baseUrl)}/setup/status`, {
       timeoutMs: 8_000,
