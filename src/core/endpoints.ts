@@ -50,7 +50,7 @@ export function apiBase(baseUrl: string): string {
 
 /**
  * Candidate HTTP ingest endpoints to try, in order. Real deployments differ:
- *   - cheaper SaaS: `/ingest` on the base domain          → baseUrl/ingest
+ *   - cheaper SaaS: `/ingest/` on the base domain         → baseUrl/ingest/
  *   - dedicated SaaS: a separate Vector host              → https://ingest-<sub>.<domain>
  *   - open-core (docker-compose.opensource.yml): direct  → host:8080
  * An explicit override short-circuits the list; the spine probes the rest and uses the first that
@@ -58,7 +58,10 @@ export function apiBase(baseUrl: string): string {
  */
 export function ingestCandidates(baseUrl: string, explicit?: string): string[] {
   if (explicit) return [explicit];
-  const candidates = [`${baseUrl}/ingest`];
+  // The trailing slash matters: managed compose boxes serve `location /ingest/` and 301 the bare
+  // path, and the spine treats any redirect as "wrong endpoint". Keep the bare path as a fallback
+  // for proxies that only match `/ingest` exactly.
+  const candidates = [`${baseUrl}/ingest/`, `${baseUrl}/ingest`];
   try {
     const u = new URL(baseUrl);
     const host = u.hostname;
@@ -72,7 +75,7 @@ export function ingestCandidates(baseUrl: string, explicit?: string): string[] {
     // Open-core direct Vector port.
     candidates.push(`${u.protocol}//${host}:8080/`);
   } catch {
-    /* baseUrl already normalized; the /ingest candidate stands */
+    /* baseUrl already normalized; the /ingest candidates stand */
   }
   return candidates;
 }
