@@ -65,6 +65,18 @@ export interface ParserRepository {
   url?: string;
   enabled?: boolean;
   parser_count?: number;
+  branch?: string;
+  last_synced_at?: string | null;
+  last_sync_status?: string | null;
+  last_sync_error?: string | null;
+}
+
+/** Progress of an in-flight repository sync. */
+export interface RepoSyncStatus {
+  status?: string;
+  parser_count?: number;
+  error?: string | null;
+  message?: string | null;
 }
 
 /**

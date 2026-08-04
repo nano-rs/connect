@@ -6,6 +6,7 @@ import {
   type LogSource,
   NanoApiError,
   type ParserRepository,
+  type RepoSyncStatus,
   type RepositoryParser,
   type SearchResponse,
   type SetupStatus,
@@ -124,6 +125,34 @@ export class NanoClient {
     return Array.isArray(res) ? res : (res.repositories ?? []);
   }
 
+  /**
+   * Register a parser repository. Needs `parser_repositories:manage` — that's why it's a separate
+   * opt-in step and not part of the normal onboarding flow.
+   */
+  async createParserRepository(repo: Record<string, unknown>): Promise<ParserRepository> {
+    return request<ParserRepository>(`${apiBase(this.baseUrl)}/parser-repositories`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...this.authHeaders() },
+      body: JSON.stringify(repo),
+    });
+  }
+
+  /** Kick off a repository sync. Returns immediately — the sync runs async server-side. */
+  async syncParserRepository(repoId: string): Promise<void> {
+    await request<unknown>(`${apiBase(this.baseUrl)}/parser-repositories/${repoId}/sync`, {
+      method: "POST",
+      headers: this.authHeaders(),
+    });
+  }
+
+  /** Poll an in-flight sync. */
+  async parserRepositorySyncStatus(repoId: string): Promise<RepoSyncStatus> {
+    return request<RepoSyncStatus>(
+      `${apiBase(this.baseUrl)}/parser-repositories/${repoId}/sync/status`,
+      { headers: this.authHeaders() },
+    );
+  }
+
   /** List parsers available in a repository, optionally filtered by a search term. */
   async listRepositoryParsers(repoId: string, search?: string): Promise<RepositoryParser[]> {
     const q = search ? `?search=${encodeURIComponent(search)}` : "";
@@ -152,6 +181,19 @@ export class NanoClient {
   /** Deploy a log source to Vector. Returns the result — note the API returns 200 even on failure. */
   async deployLogSource(id: string): Promise<DeploymentResult> {
     return request<DeploymentResult>(`${apiBase(this.baseUrl)}/log-sources/${id}/deploy`, {
+      method: "POST",
+      headers: this.authHeaders(),
+    });
+  }
+
+  /**
+   * Publish a log source: validate its VRL, promote the working copy to a new ACTIVE version,
+   * and deploy it. Importing a parser leaves it as a working copy — `deploy` alone pushes
+   * whatever version is already active, which for a fresh import is nothing. Publishing is what
+   * actually puts the parser in the pipeline.
+   */
+  async publishLogSource(id: string): Promise<DeploymentResult> {
+    return request<DeploymentResult>(`${apiBase(this.baseUrl)}/log-sources/${id}/publish`, {
       method: "POST",
       headers: this.authHeaders(),
     });

@@ -1,6 +1,7 @@
-import { confirm, intro, note, outro, select, spinner, text } from "@clack/prompts";
+import { confirm, intro, log, note, outro, select, spinner, text } from "@clack/prompts";
 import pc from "picocolors";
 import {
+  agentDestination,
   buildLinuxAgentSystemd,
   buildLinuxAgentToml,
   buildWindowsAgentToml,
@@ -11,9 +12,18 @@ import {
 import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
 import { resolveSavedConnection } from "./core/connection.js";
+import { buildIngestEnvFile, MTLS_SECRET_FILES, mtlsArtifacts, type NanoUplink, resolveUplink } from "./core/uplink.js";
 import { ID_RE, parseHostPort } from "./core/target.js";
 import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE, type Target } from "./core/vector.js";
+
+/** Short transport description for the generated READMEs. */
+function transportDoc(uplink: NanoUplink): string {
+  if (uplink.transport === "http") return "HTTPS + ingest token";
+  return uplink.tls.enabled
+    ? `Vector-native, TLS${uplink.tls.mtls ? " + client certificate" : ""}`
+    : "Vector-native, on your network";
+}
 import { reviewParsers } from "./reviewParsers.js";
 import { orExit } from "./ui/ui.js";
 
@@ -28,6 +38,11 @@ export interface AddAgentOptions {
   toNano?: boolean;
   journald?: boolean;
   outDir?: string;
+  /** native | http — only meaningful when shipping straight to nano. */
+  transport?: string;
+  mtlsDir?: string;
+  ingestUrl?: string;
+  ingestToken?: string;
   /** Auto-deploy available community parsers without prompting. */
   deployParsers?: boolean;
   nonInteractive?: boolean;
@@ -61,7 +76,18 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
   }
 
   // Where it ships (aggregator by default; nano directly if asked).
-  const target = await resolveTarget(conn.baseUrl, opts);
+  const uplink = await resolveAgentUplink(conn, opts);
+  if (uplink.transport === "native") {
+    log.info(
+      uplink.tls.enabled
+        ? `Transport: Vector-native + TLS → ${uplink.target.host}:${uplink.target.port}${
+            uplink.tls.mtls ? ` (client certificate from ${uplink.mtlsDir})` : ""
+          }.`
+        : `Transport: Vector-native → ${uplink.target.host}:${uplink.target.port} (your aggregator; the nano uplink is secured on the aggregator itself).`,
+    );
+  } else {
+    log.info(`Transport: HTTPS → ${uplink.ingestUrl} (authenticated with your ingest token).`);
+  }
 
   const generatedAt = new Date().toISOString();
   const dir = opts.outDir ?? `./onboarding/agent-${os}`;
@@ -71,14 +97,22 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
   let paths: string[];
   let sourceTypes: string[] = [];
   if (os === "windows") {
-    paths = writeArtifacts(dir, {
-      "vector.toml": buildWindowsAgentToml(
-        { target, channels: DEFAULT_WINDOWS_CHANNELS, bufferBytes: BUFFER_BYTES },
-        generatedAt,
-      ),
-      "install-agent.ps1": buildWindowsInstaller(),
-      "README.md": windowsReadme(target, generatedAt),
-    });
+    paths = writeArtifacts(
+      dir,
+      {
+        "vector.toml": buildWindowsAgentToml(
+          { uplink, channels: DEFAULT_WINDOWS_CHANNELS, bufferBytes: BUFFER_BYTES },
+          generatedAt,
+        ),
+        "install-agent.ps1": buildWindowsInstaller(),
+        "README.md": windowsReadme(uplink, generatedAt),
+        ...(uplink.transport === "http" && uplink.ingestToken
+          ? { ".env": buildIngestEnvFile(uplink.ingestToken) }
+          : {}),
+        ...mtlsArtifacts(uplink),
+      },
+      { secretFiles: [".env", ...MTLS_SECRET_FILES] },
+    );
     sourceTypes = ["windows_event", "windows_sysmon"];
     s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
     note(
@@ -95,11 +129,19 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
     if (!journald && files.length === 0) {
       throw new NanoApiError("Nothing to collect: enable journald or add a file group.");
     }
-    paths = writeArtifacts(dir, {
-      "vector.toml": buildLinuxAgentToml({ target, journald, files, bufferBytes: BUFFER_BYTES, image: DEFAULT_IMAGE }, generatedAt),
-      "nano-agent.service": buildLinuxAgentSystemd(),
-      "README.md": linuxReadme(target, journald, files, generatedAt),
-    });
+    paths = writeArtifacts(
+      dir,
+      {
+        "vector.toml": buildLinuxAgentToml({ uplink, journald, files, bufferBytes: BUFFER_BYTES, image: DEFAULT_IMAGE }, generatedAt),
+        "nano-agent.service": buildLinuxAgentSystemd(Boolean(uplink.tls.mtls)),
+        "README.md": linuxReadme(uplink, journald, files, generatedAt),
+        ...(uplink.transport === "http" && uplink.ingestToken
+          ? { ".env": buildIngestEnvFile(uplink.ingestToken) }
+          : {}),
+        ...mtlsArtifacts(uplink),
+      },
+      { secretFiles: [".env", ...MTLS_SECRET_FILES] },
+    );
     sourceTypes = [
       ...(journald ? ["linux_journald", "linux_sysmon"] : []),
       ...files.map((f) => f.sourceType),
@@ -126,10 +168,38 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
   outro(pc.green("Agent config ready."));
 }
 
-async function resolveTarget(baseUrl: string, opts: AddAgentOptions): Promise<Target> {
-  const nanoHost = new URL(baseUrl).hostname;
-  if (opts.toNano) return { host: nanoHost, port: NANO_VECTOR_PORT };
-  if (opts.target) return parseHostPort(opts.target, DEFAULT_AGGREGATOR_PORT);
+/**
+ * Where the agent ships. Two distinct hops with different security properties:
+ *   • to an aggregator — YOUR infrastructure, on your network. Plain Vector-native; the
+ *     generated aggregator's `[sources.agents]` doesn't terminate TLS, so enabling it here
+ *     would just fail the handshake.
+ *   • to nano — leaves your network. Always TLS on native, or HTTPS + token on http.
+ */
+async function resolveAgentUplink(
+  conn: { baseUrl: string; ingestToken?: string; ingestUrl?: string },
+  opts: AddAgentOptions,
+): Promise<NanoUplink> {
+  const nanoHost = new URL(conn.baseUrl).hostname;
+  const toNano = (): NanoUplink =>
+    resolveUplink({
+      baseUrl: conn.baseUrl,
+      target: { host: nanoHost, port: NANO_VECTOR_PORT },
+      opts,
+      savedIngestUrl: conn.ingestUrl,
+      ingestToken: opts.ingestToken ?? conn.ingestToken,
+    });
+  const toAggregator = (target: Target): NanoUplink => {
+    if (opts.transport === "http") {
+      throw new NanoApiError(
+        "--transport http applies to the nano uplink, not the agent→aggregator hop. Use --to-nano " +
+          "with --transport http, or set --transport http on the aggregator instead.",
+      );
+    }
+    return { transport: "native", target, ingestUrl: "", tls: { enabled: false } };
+  };
+
+  if (opts.toNano) return toNano();
+  if (opts.target) return toAggregator(parseHostPort(opts.target, DEFAULT_AGGREGATOR_PORT));
   if (opts.nonInteractive) {
     throw new NanoApiError("Pass --target <aggregator-host[:port]> or --to-nano.");
   }
@@ -142,7 +212,7 @@ async function resolveTarget(baseUrl: string, opts: AddAgentOptions): Promise<Ta
       ],
     }),
   ) as string;
-  if (where === "nano") return { host: nanoHost, port: NANO_VECTOR_PORT };
+  if (where === "nano") return toNano();
   const hp = orExit(
     await text({
       message: "Aggregator address (host or host:port)",
@@ -150,7 +220,7 @@ async function resolveTarget(baseUrl: string, opts: AddAgentOptions): Promise<Ta
       validate: (v) => (v.trim() ? undefined : "Required."),
     }),
   );
-  return parseHostPort(hp, DEFAULT_AGGREGATOR_PORT);
+  return toAggregator(parseHostPort(hp, DEFAULT_AGGREGATOR_PORT));
 }
 
 async function resolveLinuxFiles(opts: AddAgentOptions): Promise<LinuxFileGroup[]> {
@@ -173,10 +243,10 @@ async function resolveLinuxFiles(opts: AddAgentOptions): Promise<LinuxFileGroup[
   return [{ id: sourceType, paths: paths.split(",").map((p) => p.trim()).filter(Boolean), sourceType }];
 }
 
-function windowsReadme(target: Target, generatedAt: string): string {
+function windowsReadme(uplink: NanoUplink, generatedAt: string): string {
   return `# nano Windows endpoint agent
 
-Generated ${generatedAt}. Ships to \`${target.host}:${target.port}\` (Vector-native).
+Generated ${generatedAt}. Ships to \`${agentDestination(uplink)}\` (${transportDoc(uplink)}).
 
 1. Copy this folder to the Windows endpoint.
 2. Elevated PowerShell: \`powershell -ExecutionPolicy Bypass -File .\\install-agent.ps1\`
@@ -192,13 +262,13 @@ bug, vectordotdev/vector#25194).
 `;
 }
 
-function linuxReadme(target: Target, journald: boolean, files: LinuxFileGroup[], generatedAt: string): string {
+function linuxReadme(uplink: NanoUplink, journald: boolean, files: LinuxFileGroup[], generatedAt: string): string {
   const collecting = [journald ? "journald (`linux_journald`)" : null, ...files.map((f) => `\`${f.sourceType}\` (${f.paths.join(", ")})`)]
     .filter(Boolean)
     .join(", ");
   return `# nano Linux endpoint agent
 
-Generated ${generatedAt}. Ships to \`${target.host}:${target.port}\` (Vector-native).
+Generated ${generatedAt}. Ships to \`${agentDestination(uplink)}\` (${transportDoc(uplink)}).
 Collecting: ${collecting}.
 
 1. Copy this folder to the Linux endpoint.

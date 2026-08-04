@@ -15,10 +15,10 @@ import { NanoClient } from "./core/api.js";
 import { ingestCandidates, isInsecureRemote, normalizeBaseUrl } from "./core/endpoints.js";
 import { findEnvFile } from "./core/env.js";
 import { sendTestEvent } from "./core/ingest.js";
-import { loadProfile, saveProfile } from "./core/profile.js";
+import { currentBaseUrl, knownInstances, loadInstance, saveInstance } from "./core/profile.js";
 import { ELEVATED_SCOPES, REQUIRED_SCOPES, SCOPE_DESCRIPTIONS } from "./core/scopes.js";
 import { NanoApiError } from "./core/types.js";
-import { verifyMarker } from "./core/verify.js";
+import { hasRecentEvents, verifyMarker } from "./core/verify.js";
 import { maskSecret, orExit } from "./ui/ui.js";
 
 /** source_type used for the synthetic connectivity-check event. */
@@ -44,7 +44,6 @@ export async function runConnect(opts: ConnectOptions): Promise<void> {
 
   intro(pc.inverse(" nano connect "));
 
-  const profile = loadProfile();
   const env = findEnvFile(opts.envFile);
   if (env) {
     log.info(`Found a nano install config at ${pc.dim(env.path)} — using it for defaults.`);
@@ -53,7 +52,7 @@ export async function runConnect(opts: ConnectOptions): Promise<void> {
   // 1. Base URL
   const baseUrl = normalizeBaseUrl(
     opts.url ??
-      profile.baseUrl ??
+      currentBaseUrl() ??
       env?.baseUrl ??
       (await promptRequired(opts, "What's your nano URL?", {
         placeholder: "https://nano.example.com",
@@ -73,6 +72,8 @@ export async function runConnect(opts: ConnectOptions): Promise<void> {
     }
   }
 
+  // Everything saved for THIS instance. A different instance's secrets are never in scope.
+  const profile = loadInstance(baseUrl);
   const client = new NanoClient(baseUrl, { searchUrl: opts.searchUrl });
 
   // 2. Connectivity — probe /api/setup/status: it's a stable JSON endpoint under /api on BOTH
@@ -110,11 +111,11 @@ export async function runConnect(opts: ConnectOptions): Promise<void> {
       hint: "Self-hosted: it's in your nano install's .env. SaaS: from your nano admin console.",
     }));
 
-  saveProfile({ baseUrl, apiKey, ingestToken, searchUrl: opts.searchUrl });
+  saveInstance(baseUrl, { apiKey, ingestToken, searchUrl: opts.searchUrl });
 
   // 5. Prove the full path works end-to-end with a synthetic event.
   const ingestEndpoints = ingestCandidates(baseUrl, opts.ingestUrl);
-  await runConnectivityCheck(client, ingestEndpoints, ingestToken, opts);
+  await runConnectivityCheck(client, baseUrl, ingestEndpoints, ingestToken, opts);
 
   note(
     [
@@ -214,7 +215,9 @@ async function loginAndMint(client: NanoClient): Promise<string> {
   note(
     [...REQUIRED_SCOPES, ...ELEVATED_SCOPES]
       .map((scope) => `  ${pc.cyan(scope)} — ${SCOPE_DESCRIPTIONS[scope] ?? ""}`)
-      .join("\n") + pc.dim("\n  (the last two are best-effort — skipped if your account can't grant them)"),
+      .join("\n") + pc.dim(
+        `\n  (the last ${ELEVATED_SCOPES.length} are best-effort — skipped if your account can't grant them)`,
+      ),
     "I'll create an API key named 'nano-connect' with these permissions",
   );
   const proceed = orExit(await confirm({ message: "Create this API key?" }));
@@ -258,6 +261,7 @@ async function loginAndMint(client: NanoClient): Promise<string> {
 /** Send a synthetic event and confirm it becomes searchable — the end-to-end smoke test. */
 async function runConnectivityCheck(
   client: NanoClient,
+  baseUrl: string,
   ingestEndpoints: string[],
   ingestToken: string,
   opts: ConnectOptions,
@@ -278,24 +282,50 @@ async function runConnectivityCheck(
   try {
     const sent = await sendTestEvent(ingestEndpoints, ingestToken, TEST_SOURCE_TYPE);
     marker = sent.marker;
+    // Remember which candidate won so `add-* --transport http` targets a proven URL.
+    saveInstance(baseUrl, { ingestUrl: sent.endpoint });
     s.stop(pc.green(`Test event accepted by ${sent.endpoint}`));
   } catch (err) {
     s.stop(pc.red("Ingest failed"));
     throw err;
   }
 
-  // Best-effort: see if it becomes searchable. A throwaway source_type has no parser, so on
-  // OCSF-normalized deployments it won't be — that's expected, not a failure. Real searchability
-  // is confirmed per-source once a collector (with a matching parser) is wired up.
+  // See if it becomes searchable. Budget this generously: a single event waits out Vector's
+  // sink batch timer (10s by default) AND ClickHouse's async-insert window (adaptive, up to 10s,
+  // and it sits at the high end on a quiet instance) before it can be selected. A 12s budget —
+  // what this used to be — expires below that floor, so a healthy instance reported "accepted but
+  // not searchable" on essentially every first run. Measured 12–35s on managed tenants.
   s.start("Checking whether it's already searchable");
-  const result = await verifyMarker(client, TEST_SOURCE_TYPE, marker, { timeoutMs: 12_000 });
+  const result = await verifyMarker(client, TEST_SOURCE_TYPE, marker, { timeoutMs: 45_000 });
   if (result.arrived) {
     s.stop(pc.green(`Searchable already (${result.count} match) — ingest + query both work`));
   } else {
     s.stop(pc.green("Ingest endpoint accepted the event"));
-    log.info(
-      "The endpoint accepted the event, but it isn't searchable yet — that's usually just batching (Vector flushes on an interval), and a throwaway test source has no parser. Note some deployments accept-then-drop events with a wrong token, so if real events never show up, re-check VECTOR_AUTH_TOKEN. Set up a collector for a real source next.",
-    );
+    // Two very different causes look identical from here, so ask the instance which one it is
+    // rather than asserting. A wrong token loses only OUR event (nano answers 200 and drops it
+    // downstream); a stalled pipeline loses everyone's.
+    const others = await hasRecentEvents(client);
+    if (others === true) {
+      log.warn(
+        `The endpoint accepted the event, but it never became searchable — while other events ARE arriving on this instance. That points at the ingest token: nano returns 200 and drops events with a wrong token, so a successful POST doesn't prove the credential. Re-check ${pc.cyan(
+          "VECTOR_AUTH_TOKEN",
+        )} against this instance.`,
+      );
+    } else if (others === false) {
+      log.warn(
+        `The endpoint accepted the event, but it never became searchable — and no events at all are arriving on this instance right now. That looks like the instance isn't delivering to storage, rather than anything wrong with your token or this collector. Check the nano deployment's health, then re-check with ${pc.cyan(
+          `connect verify --source ${TEST_SOURCE_TYPE}`,
+        )}. (On a brand-new instance with no other sources yet, this is also just what "no data" looks like.)`,
+      );
+    } else {
+      log.warn(
+        `The endpoint accepted the event, but it isn't searchable yet and I couldn't check whether other events are arriving. Two usual causes: a wrong ${pc.cyan(
+          "VECTOR_AUTH_TOKEN",
+        )} (nano returns 200 and drops it), or a slow flush. Re-check with ${pc.cyan(
+          `connect verify --source ${TEST_SOURCE_TYPE}`,
+        )}.`,
+      );
+    }
   }
 }
 

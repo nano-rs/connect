@@ -1,6 +1,7 @@
 import { intro, log, multiselect, note, outro, spinner } from "@clack/prompts";
 import pc from "picocolors";
 import {
+  AGENT_SOURCE_TYPES,
   AGGREGATOR_CONTAINER,
   buildAggregatorCompose,
   buildAggregatorReadme,
@@ -11,6 +12,7 @@ import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
 import { SYSLOG_CATALOG } from "./core/catalog.js";
 import { resolveSavedConnection } from "./core/connection.js";
+import { buildIngestEnvFile, MTLS_SECRET_FILES, mtlsArtifacts, resolveUplink } from "./core/uplink.js";
 import { unauthenticatedVectorWarning, validateHost, validatePort } from "./core/target.js";
 import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE } from "./core/vector.js";
@@ -25,8 +27,13 @@ export interface AddAggregatorOptions {
   vectorHost?: string;
   vectorPort?: string;
   agentPort?: string;
-  devices?: string;
+  sources?: string;
   outDir?: string;
+  /** native | http — how the aggregator reaches nano. */
+  transport?: string;
+  mtlsDir?: string;
+  ingestUrl?: string;
+  ingestToken?: string;
   /** Pull the image and start the aggregator here after generating. */
   run?: boolean;
   /** Auto-deploy available community parsers without prompting. */
@@ -46,12 +53,12 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
 
   // Syslog devices the aggregator should also listen for (optional).
   let selectedIds: string[] = [];
-  if (opts.devices !== undefined) {
-    selectedIds = opts.devices.split(",").map((s) => s.trim()).filter(Boolean);
+  if (opts.sources !== undefined) {
+    selectedIds = opts.sources.split(",").map((s) => s.trim()).filter(Boolean);
     const known = new Set(SYSLOG_CATALOG.map((d) => d.id));
     const unknown = selectedIds.filter((id) => !known.has(id));
     if (unknown.length) {
-      throw new NanoApiError(`Unknown device id(s): ${unknown.join(", ")}. Known: ${SYSLOG_CATALOG.map((d) => d.id).join(", ")}`);
+      throw new NanoApiError(`Unknown source_type(s): ${unknown.join(", ")}. Run \`connect list-sources\` to see the ${SYSLOG_CATALOG.length} built-ins.`);
     }
   } else if (!opts.nonInteractive) {
     selectedIds = orExit(
@@ -69,14 +76,35 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
   const nanoPort = validatePort(Number(opts.vectorPort ?? DEFAULT_NANO_PORT), "--vector-port");
   const agentPort = validatePort(Number(opts.agentPort ?? DEFAULT_AGENT_PORT), "--agent-port");
 
-  const warning = unauthenticatedVectorWarning(conn.baseUrl, nanoHost, nanoPort);
-  if (warning) log.warn(warning);
+  const uplink = resolveUplink({
+    baseUrl: conn.baseUrl,
+    target: { host: nanoHost, port: nanoPort },
+    opts,
+    savedIngestUrl: conn.ingestUrl,
+    ingestToken: opts.ingestToken ?? conn.ingestToken,
+  });
+
+  if (uplink.transport === "native") {
+    const warning = unauthenticatedVectorWarning(conn.baseUrl, nanoHost, nanoPort);
+    if (warning) log.warn(warning);
+    log.info(
+      `Transport: Vector-native + TLS → ${nanoHost}:${nanoPort}${
+        uplink.tls.mtls ? ` (client certificate from ${uplink.mtlsDir})` : ""
+      }.`,
+    );
+  } else {
+    log.info(`Transport: HTTPS → ${uplink.ingestUrl} (authenticated with your ingest token).`);
+    log.warn(
+      `HTTP transport fans out per source_type. Agent types beyond ${pc.dim(
+        AGENT_SOURCE_TYPES.join(", "),
+      )} are DROPPED unless you add a route + sink for them in vector.toml.`,
+    );
+  }
 
   const plan: AggregatorPlan = {
     agentPort,
     syslogSelected,
-    nanoHost,
-    nanoPort,
+    uplink,
     bufferBytes: BUFFER_BYTES,
     image: DEFAULT_IMAGE,
   };
@@ -85,11 +113,19 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
   const dir = opts.outDir ?? "./onboarding/aggregator";
   const s = spinner();
   s.start("Generating aggregator config");
-  const paths = writeArtifacts(dir, {
-    "vector.toml": buildAggregatorToml(plan, generatedAt),
-    "docker-compose.yml": buildAggregatorCompose(plan),
-    "README.md": buildAggregatorReadme(plan, generatedAt),
-  });
+  const paths = writeArtifacts(
+    dir,
+    {
+      "vector.toml": buildAggregatorToml(plan, generatedAt),
+      "docker-compose.yml": buildAggregatorCompose(plan),
+      "README.md": buildAggregatorReadme(plan, generatedAt),
+      ...(uplink.transport === "http" && uplink.ingestToken
+        ? { ".env": buildIngestEnvFile(uplink.ingestToken) }
+        : {}),
+      ...mtlsArtifacts(uplink),
+    },
+    { secretFiles: [".env", ...MTLS_SECRET_FILES] },
+  );
   s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
 
   if (conn.apiKey && syslogSelected.length > 0) {

@@ -4,6 +4,7 @@ import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
 import { SYSLOG_CATALOG } from "./core/catalog.js";
 import { resolveSavedConnection } from "./core/connection.js";
+import { buildIngestEnvFile, MTLS_SECRET_FILES, mtlsArtifacts, resolveUplink } from "./core/uplink.js";
 import { unauthenticatedVectorWarning, validateHost, validatePort } from "./core/target.js";
 import {
   buildDockerCompose,
@@ -27,8 +28,16 @@ export interface AddSourceOptions {
   vectorHost?: string;
   vectorPort?: string;
   outDir?: string;
-  /** Comma-separated device ids to enable (lets non-interactive runs be precise). */
-  devices?: string;
+  /** native | http — how this collector reaches nano. */
+  transport?: string;
+  /** Directory with ca.crt/client.crt/client.key from the deployment's mTLS bundle. */
+  mtlsDir?: string;
+  /** Override the ingest endpoint for --transport http. */
+  ingestUrl?: string;
+  /** Ingest token for --transport http (otherwise from the saved connection). */
+  ingestToken?: string;
+  /** Comma-separated source_types to collect (lets non-interactive runs be precise). */
+  sources?: string;
   /** Pull the image and start the collector here after generating. */
   run?: boolean;
   /** Auto-deploy available community parsers without prompting. */
@@ -48,19 +57,19 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
 
   // Which devices to enable now (the rest ship commented-out for later).
   let selectedIds: string[];
-  if (opts.devices !== undefined) {
-    selectedIds = opts.devices.split(",").map((s) => s.trim()).filter(Boolean);
+  if (opts.sources !== undefined) {
+    selectedIds = opts.sources.split(",").map((s) => s.trim()).filter(Boolean);
     const known = new Set(SYSLOG_CATALOG.map((d) => d.id));
     const unknown = selectedIds.filter((id) => !known.has(id));
     if (unknown.length) {
       throw new NanoApiError(
-        `Unknown device id(s): ${unknown.join(", ")}. Known: ${SYSLOG_CATALOG.map((d) => d.id).join(", ")}`,
+        `Unknown source_type(s): ${unknown.join(", ")}. Run \`connect list-sources\` to see the ${SYSLOG_CATALOG.length} built-ins.`,
       );
     }
   } else if (opts.nonInteractive) {
     selectedIds = SYSLOG_CATALOG.map((d) => d.id);
     log.warn(
-      `Non-interactive with no --devices: enabling ALL ${SYSLOG_CATALOG.length} device types and opening their ports. Pass --devices a,b to narrow.`,
+      `Non-interactive with no --sources: enabling ALL ${SYSLOG_CATALOG.length} source_types and opening their ports. Pass --sources a,b to narrow.`,
     );
   } else {
     selectedIds = orExit(
@@ -84,15 +93,31 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
   const nanoHost = opts.vectorHost ?? new URL(conn.baseUrl).hostname;
   const nanoPort = validatePort(Number(opts.vectorPort ?? DEFAULT_VECTOR_PORT), "--vector-port");
 
-  // Vector-native (:6000) is unauthenticated in nano's config — fine on a trusted network/VPN,
-  // risky across the internet. Warn when the target looks like a public/remote host.
-  const warning = unauthenticatedVectorWarning(conn.baseUrl, nanoHost, nanoPort);
-  if (warning) log.warn(warning);
+  const uplink = resolveUplink({
+    baseUrl: conn.baseUrl,
+    target: { host: nanoHost, port: nanoPort },
+    opts,
+    savedIngestUrl: conn.ingestUrl,
+    ingestToken: opts.ingestToken ?? conn.ingestToken,
+  });
+
+  if (uplink.transport === "native") {
+    // The native port carries no ingest token — TLS protects the data in transit, but anyone who
+    // can reach the port can also write to it. Say so plainly.
+    const warning = unauthenticatedVectorWarning(conn.baseUrl, nanoHost, nanoPort);
+    if (warning) log.warn(warning);
+    log.info(
+      `Transport: Vector-native + TLS → ${nanoHost}:${nanoPort}${
+        uplink.tls.mtls ? ` (client certificate from ${uplink.mtlsDir})` : ""
+      }. Use ${pc.cyan("--transport http")} for a token-authenticated uplink.`,
+    );
+  } else {
+    log.info(`Transport: HTTPS → ${uplink.ingestUrl} (authenticated with your ingest token).`);
+  }
 
   const plan: SyslogPlan = {
     selected,
-    nanoHost,
-    nanoPort,
+    uplink,
     bufferBytes: DEFAULT_BUFFER_BYTES,
     image: DEFAULT_IMAGE,
   };
@@ -101,12 +126,21 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
   const dir = opts.outDir ?? "./onboarding/syslog";
   const s = spinner();
   s.start("Generating collector config");
-  const paths = writeArtifacts(dir, {
-    "vector.toml": buildVectorToml(plan, generatedAt),
-    "docker-compose.yml": buildDockerCompose(plan),
-    "nano-collector.service": buildSystemdUnit(),
-    "README.md": buildReadme(plan, generatedAt),
-  });
+  const paths = writeArtifacts(
+    dir,
+    {
+      "vector.toml": buildVectorToml(plan, generatedAt),
+      "docker-compose.yml": buildDockerCompose(plan),
+      "nano-collector.service": buildSystemdUnit(Boolean(uplink.tls.mtls)),
+      "README.md": buildReadme(plan, generatedAt),
+      // Keeps the ingest token out of vector.toml and out of the compose file.
+      ...(uplink.transport === "http" && uplink.ingestToken
+        ? { ".env": buildIngestEnvFile(uplink.ingestToken) }
+        : {}),
+      ...mtlsArtifacts(uplink),
+    },
+    { secretFiles: [".env", ...MTLS_SECRET_FILES] },
+  );
   s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
 
   // Device-pointing table.
