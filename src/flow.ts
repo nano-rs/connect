@@ -292,9 +292,9 @@ async function runConnectivityCheck(
   if (result.arrived) {
     s.stop(pc.green(`Searchable already (${result.count} match) — ingest + query both work`));
   } else {
-    s.stop(pc.green("Ingest path confirmed"));
+    s.stop(pc.green("Ingest endpoint accepted the event"));
     log.info(
-      "Your event reached ingestion (token + endpoint are correct). It may take a moment to be searchable (Vector batches before flushing); a parser then normalizes it into UDM fields. Set up a collector for a real source next.",
+      "The endpoint accepted the event, but it isn't searchable yet — that's usually just batching (Vector flushes on an interval), and a throwaway test source has no parser. Note some deployments accept-then-drop events with a wrong token, so if real events never show up, re-check VECTOR_AUTH_TOKEN. Set up a collector for a real source next.",
     );
   }
 }
