@@ -109,6 +109,19 @@ export interface DeployOutcome {
 /** Import a repository parser, then deploy it. Throws if the IMPORT fails (e.g. 403). */
 export async function deployParser(client: NanoClient, repoId: string, filePath: string): Promise<DeployOutcome> {
   const logSourceId = await client.importParser(repoId, filePath);
-  const result = await client.deployLogSource(logSourceId);
-  return { logSourceId, activated: result.success, message: result.message };
+  // Publish (not just deploy): the import creates a working copy, and only publishing validates
+  // its VRL, promotes it to an active version, and pushes it into the ingest pipeline. Deploying
+  // alone leaves the parser inert — the log source exists and reports deployed, but events keep
+  // falling through to the generic lane.
+  try {
+    const published = await client.publishLogSource(logSourceId);
+    return { logSourceId, activated: published.success, message: published.message };
+  } catch (err) {
+    // Older instances may not expose /publish — fall back so onboarding still works there.
+    if (err instanceof NanoApiError && err.status === 404) {
+      const result = await client.deployLogSource(logSourceId);
+      return { logSourceId, activated: result.success, message: result.message };
+    }
+    throw err;
+  }
 }

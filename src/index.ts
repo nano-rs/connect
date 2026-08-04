@@ -1,4 +1,4 @@
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import pc from "picocolors";
 import pkg from "../package.json" with { type: "json" };
 import { type AddAgentOptions, runAddAgent } from "./addAgent.js";
@@ -6,6 +6,8 @@ import { type AddAggregatorOptions, runAddAggregator } from "./addAggregator.js"
 import { type AddSourceOptions, runAddSource } from "./addSource.js";
 import { type ConnectOptions, runConnect } from "./flow.js";
 import { NanoApiError } from "./core/types.js";
+import { SYSLOG_CATALOG } from "./core/catalog.js";
+import { runSyncParsers } from "./syncParsers.js";
 import { type VerifyOptions, runVerify } from "./verifyCmd.js";
 
 function fail(err: unknown): never {
@@ -62,11 +64,16 @@ program
   .option("--env-file <path>", "path to a nano install .env to read connection details from")
   .option("--vector-host <host>", "nano Vector-native host (defaults to the nano URL's host)")
   .option("--vector-port <port>", "nano Vector-native port (default 6000)")
-  .option("--devices <ids>", "comma-separated device ids to enable (e.g. cisco_asa,fortinet_fortigate)")
+  .option("--transport <mode>", "how the collector reaches nano: native (Vector-native + TLS) | http (HTTPS + ingest token)", "native")
+  .option("--mtls-dir <dir>", "where to find the Vector mTLS bundle (default: the current directory — just drop ca.crt, client.crt, client.key in)")
+  .option("--ingest-url <url>", "override the ingest endpoint used by --transport http")
+  .option("--ingest-token <token>", "ingest token for --transport http (defaults to your saved connection)")
+  .option("--sources <ids>", "comma-separated source_types to collect — see `connect list-sources` (e.g. cisco_asa,palo_alto)")
+  .addOption(new Option("--devices <ids>", "deprecated alias for --sources").hideHelp())
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/syslog)")
   .option("--run", "pull the image and start the collector here after generating")
   .option("--deploy-parsers", "auto-deploy available community parsers for your sources")
-  .option("--non-interactive", "with no --devices, enable all catalog devices instead of prompting")
+  .option("--non-interactive", "with no --sources, enable every source_type in the catalog instead of prompting")
   .action(async (raw: Record<string, unknown>) => {
     const opts: AddSourceOptions = {
       url: raw.url as string | undefined,
@@ -74,7 +81,11 @@ program
       envFile: raw.envFile as string | undefined,
       vectorHost: raw.vectorHost as string | undefined,
       vectorPort: raw.vectorPort as string | undefined,
-      devices: raw.devices as string | undefined,
+      transport: raw.transport as string | undefined,
+      mtlsDir: raw.mtlsDir as string | undefined,
+      ingestUrl: raw.ingestUrl as string | undefined,
+      ingestToken: raw.ingestToken as string | undefined,
+      sources: (raw.sources ?? raw.devices) as string | undefined,
       outDir: raw.outDir as string | undefined,
       run: Boolean(raw.run),
       deployParsers: Boolean(raw.deployParsers),
@@ -96,6 +107,11 @@ program
   .option("--os <os>", "endpoint OS: windows | linux")
   .option("--target <host:port>", "where the agent ships (an aggregator), default port 9000")
   .option("--to-nano", "ship straight to nano (:6000) instead of an aggregator")
+  .option("--transport <mode>", "how the agent reaches nano when using --to-nano: native (Vector-native + TLS) | http (HTTPS + ingest token)", "native")
+  .option("--mtls-dir <dir>", "where to find the Vector mTLS bundle (default: the current directory — just drop ca.crt, client.crt, client.key in)")
+  .option("--ingest-url <url>", "override the ingest endpoint used by --transport http")
+  .option("--ingest-token <token>", "ingest token for --transport http (defaults to your saved connection)")
+
   .option("--no-journald", "(linux) don't collect journald")
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/agent-<os>)")
   .option("--deploy-parsers", "auto-deploy available community parsers for this agent's sources")
@@ -108,6 +124,10 @@ program
       os: raw.os as string | undefined,
       target: raw.target as string | undefined,
       toNano: Boolean(raw.toNano),
+      transport: raw.transport as string | undefined,
+      mtlsDir: raw.mtlsDir as string | undefined,
+      ingestUrl: raw.ingestUrl as string | undefined,
+      ingestToken: raw.ingestToken as string | undefined,
       journald: raw.journald as boolean | undefined,
       outDir: raw.outDir as string | undefined,
       deployParsers: Boolean(raw.deployParsers),
@@ -129,11 +149,17 @@ program
   .option("--vector-host <host>", "nano Vector-native host (defaults to the nano URL's host)")
   .option("--vector-port <port>", "nano Vector-native port (default 6000)")
   .option("--agent-port <port>", "port endpoint agents ship to (default 9000)")
-  .option("--devices <ids>", "comma-separated syslog device ids to also listen for")
+  .option("--transport <mode>", "how the aggregator reaches nano: native (Vector-native + TLS) | http (HTTPS + ingest token)", "native")
+  .option("--mtls-dir <dir>", "where to find the Vector mTLS bundle (default: the current directory — just drop ca.crt, client.crt, client.key in)")
+  .option("--ingest-url <url>", "override the ingest endpoint used by --transport http")
+  .option("--ingest-token <token>", "ingest token for --transport http (defaults to your saved connection)")
+
+  .option("--sources <ids>", "comma-separated syslog source_types to also listen for — see `connect list-sources`")
+  .addOption(new Option("--devices <ids>", "deprecated alias for --sources").hideHelp())
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/aggregator)")
   .option("--run", "pull the image and start the aggregator here after generating")
   .option("--deploy-parsers", "auto-deploy available community parsers for the syslog sources")
-  .option("--non-interactive", "skip prompts (no syslog devices unless --devices given)")
+  .option("--non-interactive", "skip prompts (no syslog listeners unless --sources is given)")
   .action(async (raw: Record<string, unknown>) => {
     const opts: AddAggregatorOptions = {
       url: raw.url as string | undefined,
@@ -142,7 +168,11 @@ program
       vectorHost: raw.vectorHost as string | undefined,
       vectorPort: raw.vectorPort as string | undefined,
       agentPort: raw.agentPort as string | undefined,
-      devices: raw.devices as string | undefined,
+      transport: raw.transport as string | undefined,
+      mtlsDir: raw.mtlsDir as string | undefined,
+      ingestUrl: raw.ingestUrl as string | undefined,
+      ingestToken: raw.ingestToken as string | undefined,
+      sources: (raw.sources ?? raw.devices) as string | undefined,
       outDir: raw.outDir as string | undefined,
       run: Boolean(raw.run),
       deployParsers: Boolean(raw.deployParsers),
@@ -153,6 +183,51 @@ program
     } catch (err) {
       fail(err);
     }
+  });
+
+program
+  .command("sync-parsers")
+  .description("Refresh the community parser catalog (and register the official repo if there is none).")
+  .option("--url <baseUrl>", "nano base URL (defaults to your saved connection)")
+  .option("--api-key <key>", "nano API key (defaults to your saved connection)")
+  .option("--env-file <path>", "path to a nano install .env to read connection details from")
+  .option("--add-official", "register the official nano parsers repository without prompting")
+  .option("--non-interactive", "fail instead of prompting when a required value is missing")
+  .action(async (raw: Record<string, unknown>) => {
+    try {
+      await runSyncParsers({
+        url: raw.url as string | undefined,
+        apiKey: raw.apiKey as string | undefined,
+        envFile: raw.envFile as string | undefined,
+        addOfficial: Boolean(raw.addOfficial),
+        nonInteractive: Boolean(raw.nonInteractive),
+      });
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+program
+  .command("list-sources")
+  .alias("list-devices")
+  .description("List the built-in syslog source_types you can pass to --sources.")
+  .action(() => {
+    console.log(
+      `\n${pc.bold("Syslog source_types")} — pass these to ${pc.cyan("--sources")} on add-source / add-aggregator.\n` +
+        `Each gets its own listener port so nano can tell the vendors apart.\n`,
+    );
+    const w = Math.max(...SYSLOG_CATALOG.map((d) => d.id.length));
+    for (const d of SYSLOG_CATALOG) {
+      console.log(
+        `  ${pc.cyan(d.id.padEnd(w))}  ${String(d.port).padStart(5)}/${d.mode.padEnd(3)}  ${d.label}` +
+          `${d.sourceType !== d.id ? pc.dim(`  (source_type ${d.sourceType})`) : ""}`,
+      );
+      if (d.note) console.log(`  ${" ".repeat(w)}  ${pc.dim(d.note)}`);
+    }
+    console.log(
+      `\n${pc.dim("e.g.")}  connect add-source --sources ${SYSLOG_CATALOG.slice(0, 2).map((d) => d.id).join(",")}\n` +
+        `${pc.dim("Not listed? Copy a block in the generated vector.toml and change id/port/mode/source_type.")}\n`,
+    );
   });
 
 program

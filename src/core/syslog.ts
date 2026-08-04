@@ -1,6 +1,7 @@
 import type { DeviceType } from "./catalog.js";
 import { SYSLOG_CATALOG } from "./catalog.js";
-import { commentOut, metricsSection, type Target, VECTOR_DATA_DIR, vectorSink } from "./vector.js";
+import { composeUplinkLines, type NanoUplink } from "./uplink.js";
+import { commentOut, httpSinks, metricsSection, VECTOR_DATA_DIR, vectorSink } from "./vector.js";
 
 /** Container name for the syslog collector — shared by the compose file and the deploy step. */
 export const COLLECTOR_CONTAINER = "nano-collector";
@@ -8,33 +9,43 @@ export const COLLECTOR_CONTAINER = "nano-collector";
 export interface SyslogPlan {
   /** Devices the operator chose to enable now (rendered active). */
   selected: DeviceType[];
-  /** nano's Vector-native endpoint (the `vector` source, default :6000). */
-  nanoHost: string;
-  nanoPort: number;
+  /** How this collector reaches nano (native+TLS or HTTP). */
+  uplink: NanoUplink;
   /** Disk buffer size in bytes for the sink. */
   bufferBytes: number;
   /** Container image for the docker-compose artifact. */
   image: string;
 }
 
+/** Human-readable description of where a plan ships, for headers and READMEs. */
+export function uplinkLabel(u: NanoUplink): string {
+  return u.transport === "native"
+    ? `${u.target.host}:${u.target.port} (Vector-native, TLS)`
+    : `${u.ingestUrl} (HTTPS)`;
+}
+
 /** One device's source + source_type-stamping transform. */
 function deviceBlock(d: DeviceType): string {
   return `[sources.${d.id}]
-type = "syslog"
-address = "0.0.0.0:${d.port}"
+# A raw socket, NOT Vector's \`syslog\` source, on purpose. nano's parsers are written against the
+# syslog WIRE format: cisco_asa matches "<ts> <host> %ASA-<sev>-<id>: ..." and strips the <PRI>
+# itself. Vector's syslog source pre-parses that envelope and hands on only the message body, so
+# the "%ASA-…" tag the parser keys on is gone before it ever arrives and every event lands with
+# "Could not parse ASA message ID pattern". Reading raw bytes keeps the line intact.
+type = "socket"
 mode = "${d.mode}"
+address = "0.0.0.0:${d.port}"
+
+[sources.${d.id}.decoding]
+codec = "bytes"
 
 [transforms.${d.id}_tag]
 type = "remap"
 inputs = ["${d.id}"]
 source = '''
-# Stamp nano's source_type, overwriting Vector's built-in source_type = "syslog".
-host = to_string(.host) ?? ""
-event_json = encode_json(.)
-. = {}
-.message = event_json
+# Stamp nano's source_type; .message stays exactly as it arrived on the wire.
 .source_type = "${d.sourceType}"
-.src_host = host
+.src_host = to_string(.host) ?? ""
 '''`;
 }
 
@@ -59,24 +70,58 @@ export function renderSyslogDevices(selected: DeviceType[]): { active: string; c
 
 export function buildVectorToml(plan: SyslogPlan, generatedAt: string): string {
   const { active, commented } = renderSyslogDevices(plan.selected);
-  const target: Target = { host: plan.nanoHost, port: plan.nanoPort };
 
   // A sink whose input glob matches nothing fails to load, so when no device is enabled we ship
   // the sink commented-out (the metrics chain keeps the file valid) with instructions.
-  const sink = vectorSink({ name: "nano", inputs: ["*_tag"], target, acknowledgements: false, bufferBytes: plan.bufferBytes });
+  const sink =
+    plan.uplink.transport === "native"
+      ? vectorSink({
+          name: "nano",
+          inputs: ["*_tag"],
+          target: plan.uplink.target,
+          acknowledgements: false,
+          bufferBytes: plan.bufferBytes,
+          tls: plan.uplink.tls,
+        })
+      : httpSinks(
+          plan.selected.map((d) => ({ sourceType: d.sourceType, inputs: [`${d.id}_tag`] })),
+          plan.uplink.ingestUrl,
+          plan.bufferBytes,
+        );
   const sinkSection =
     plan.selected.length > 0
       ? sink
-      : `# No device enabled yet — uncomment one above, then uncomment this sink to start forwarding.\n${commentOut(sink)}`;
+      : `# No device enabled yet — uncomment one above, then add a sink for it to start forwarding.\n${commentOut(
+          vectorSink({
+            name: "nano",
+            inputs: ["*_tag"],
+            target: plan.uplink.target,
+            acknowledgements: false,
+            bufferBytes: plan.bufferBytes,
+            tls: plan.uplink.tls,
+          }),
+        )}`;
+
+  const transportNotes =
+    plan.uplink.transport === "native"
+      ? `# Transport: Vector-native (protobuf + disk buffering) to ${plan.uplink.target.host}:${plan.uplink.target.port}, over TLS.
+#
+# To enable more device types: uncomment its block below. The sink input glob "*_tag" picks it
+# up automatically — no need to edit the sink.`
+      : `# Transport: HTTPS to ${plan.uplink.ingestUrl}, authenticated with the ingest token
+# (read from \${VECTOR_AUTH_TOKEN} — see the .env beside this file).
+#
+# IMPORTANT: nano routes on the X-Source-Type REQUEST HEADER, and Vector's http sink headers are
+# per-sink and static. So each device type needs ITS OWN sink. When you uncomment a device block
+# below, copy one of the [sinks.nano_*] blocks, point its inputs at that device's "_tag"
+# transform, and set X-Source-Type to its source_type — otherwise it lands as "unknown".`;
 
   return `# Vector edge collector for nano — generated by @nano-rs/connect on ${generatedAt}
 #
-# Collects syslog from your devices and forwards to nano over the Vector-native protocol
-# (protobuf + end-to-end acknowledgements + disk buffering — more reliable than HTTP).
+# Collects syslog from your devices and forwards to nano.
+${transportNotes}
 #
-# To enable more device types: uncomment its block below. The sink input glob "*_tag" picks it
-# up automatically — no need to edit the sink. To add a vendor that isn't listed, copy a block
-# and change the id, port, mode, and source_type.
+# To add a vendor that isn't listed, copy a block and change the id, port, mode, and source_type.
 
 data_dir = "${VECTOR_DATA_DIR}"
 
@@ -91,9 +136,9 @@ ${active || "# (none selected — uncomment a device below to start collecting)"
 ${commented}
 
 # =============================================================================
-# Sink: forward everything tagged above to nano (Vector-native :${plan.nanoPort}).
-# inputs = ["*_tag"] auto-includes any device block you uncomment. Acks are off because syslog
-# (UDP) can't honor them; the disk buffer provides durability across restarts.
+# Sink: forward everything tagged above to nano — ${uplinkLabel(plan.uplink)}.
+# Acks are off because syslog (UDP) can't honor them; the disk buffer provides durability
+# across restarts.
 # =============================================================================
 ${sinkSection}
 
@@ -115,6 +160,8 @@ export function buildDockerCompose(plan: SyslogPlan): string {
       : `      # - ${line}   # ${d.id}`;
   }).join("\n");
 
+  const { env, volumes } = composeUplinkLines(plan.uplink);
+
   return `# Run the nano edge collector as a container.
 #   docker compose up -d
 # Edit vector.toml to enable more device types, then add their ports below and re-run.
@@ -124,9 +171,9 @@ services:
     container_name: ${COLLECTOR_CONTAINER}
     restart: unless-stopped
     command: ["--config", "/etc/vector/vector.toml"]
-    volumes:
+${env}    volumes:
       - ./vector.toml:/etc/vector/vector.toml:ro
-      - nano-collector-data:${VECTOR_DATA_DIR}
+${volumes}      - nano-collector-data:${VECTOR_DATA_DIR}
     ports:
 ${ports}
       # metrics (9598) stay internal for the healthcheck; uncomment to scrape from the host:
@@ -142,9 +189,13 @@ volumes:
 `;
 }
 
-export function buildSystemdUnit(): string {
+export function buildSystemdUnit(hasMtls = false): string {
+  const tlsStep = hasMtls
+    ? "#   sudo mkdir -p /etc/vector/tls && sudo cp tls/* /etc/vector/tls/ && sudo chmod 600 /etc/vector/tls/client.key\n"
+    : "";
   return `# Install (bare-metal Vector, not Docker):
 #   sudo mkdir -p /etc/nano-collector && sudo cp vector.toml /etc/nano-collector/vector.toml
+${tlsStep}#   (vector.toml reads certificates from /etc/vector/tls — the same path docker-compose mounts)
 #   sudo cp nano-collector.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now nano-collector
 # Requires Vector installed: https://vector.dev/docs/setup/installation/
@@ -171,9 +222,28 @@ export function buildReadme(plan: SyslogPlan, generatedAt: string): string {
     .map((d) => `| ${d.label} | \`${d.sourceType}\` | **${d.port}/${d.mode}** |`)
     .join("\n");
 
+  const transportDoc =
+    plan.uplink.transport === "native"
+      ? `Forwards to nano at \`${plan.uplink.target.host}:${plan.uplink.target.port}\` over the
+Vector-native protocol, **wrapped in TLS**. nano's listener terminates TLS, so a plaintext sink
+fails the handshake and silently buffers to disk — the generated \`[sinks.nano.tls]\` block is
+what makes this work.${
+          plan.uplink.tls.mtls
+            ? `\n\nThis config also presents a client certificate from your deployment's mTLS bundle.`
+            : ""
+        }`
+      : `Forwards to nano at \`${plan.uplink.ingestUrl}\` over HTTPS, authenticated with your ingest
+token. The token lives in \`.env\` (mode 0600) beside this file — **not** in \`vector.toml\` — and is
+read as \`\${VECTOR_AUTH_TOKEN}\`.
+
+> nano routes on the \`X-Source-Type\` request header, so each device type has its **own** sink.
+> Adding a device means adding a matching \`[sinks.nano_<source_type>]\` block.`;
+
   return `# nano edge collector — syslog
 
-Generated by \`@nano-rs/connect\` on ${generatedAt}. Forwards to nano at \`${plan.nanoHost}:${plan.nanoPort}\` (Vector-native).
+Generated by \`@nano-rs/connect\` on ${generatedAt}.
+
+${transportDoc}
 
 ## 1. Run the collector
 

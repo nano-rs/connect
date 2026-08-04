@@ -49,10 +49,93 @@ export async function verifyMarker(
   return { arrived: false, count: 0, attempts };
 }
 
+/**
+ * Is ANY event arriving on this instance right now, from any source?
+ *
+ * Discriminates the two reasons a test event never becomes searchable, which otherwise look
+ * identical: a rejected ingest token (nano answers 200 and drops it, so only OUR event is
+ * missing) versus an instance that isn't delivering anything at all. Guessing between them is
+ * how you send someone to re-check a credential that was fine.
+ */
+export async function hasRecentEvents(
+  client: NanoClient,
+  windowMinutes = 15,
+): Promise<boolean | undefined> {
+  const start = new Date(Date.now() - windowMinutes * 60_000).toISOString();
+  const end = new Date(Date.now() + 60_000).toISOString();
+  try {
+    const res = await client.search("*", start, end, 1);
+    return res.results.length > 0;
+  } catch {
+    return undefined; // couldn't tell — say so rather than picking a story
+  }
+}
+
 /** A sampled count of events for a source_type — `capped` means there were at least `count`. */
 export interface RecentCount {
   count: number;
   capped: boolean;
+  /**
+   * How many sampled rows a real parser normalized, vs. fell through to the generic lane, vs.
+   * reached a parser that then failed on them. Arriving, being PARSED, and being NORMALIZED are
+   * three different things and each needs a different fix.
+   */
+  parsed: number;
+  generic: number;
+  /** A parser claimed these but couldn't read them — usually a collector/format mismatch. */
+  parseFailed: number;
+  /** An example failure message, to save a round-trip into the platform. */
+  parseError?: string;
+}
+
+/** UDM columns a normalized event populates. Enough coverage to catch any parser family. */
+const UDM_SIGNALS = [
+  "src_ip",
+  "dest_ip",
+  "src_port",
+  "dest_port",
+  "protocol",
+  "action",
+  "user",
+  "src_user",
+  "dest_user",
+  "process_name",
+  "file_path",
+  "file_name",
+  "url",
+  "query",
+] as const;
+
+function hasUdmFields(row: Record<string, unknown>): boolean {
+  return UDM_SIGNALS.some((k) => {
+    const v = row[k];
+    if (typeof v === "string") return v !== "";
+    if (typeof v === "number") return v !== 0;
+    return false;
+  });
+}
+
+type RowState = "generic" | "failed" | "parsed" | "unknown";
+
+/**
+ * Which lane handled a row.
+ *
+ * Only the catch-all lane stamps `metadata.parser_type = "generic"` — a real parser stamps
+ * nothing there, so its absence says nothing on its own. Normalization is therefore detected by
+ * the UDM columns actually being populated, and a parser that ran but couldn't read the event
+ * leaves `ext.parse_error` behind. That third state matters: it means the collector is delivering
+ * a format the parser doesn't expect, which no amount of re-deploying will fix.
+ */
+function classifyRow(row: Record<string, unknown>): { state: RowState; error?: string } {
+  const meta = (typeof row.metadata === "object" && row.metadata ? row.metadata : {}) as Record<
+    string,
+    unknown
+  >;
+  if (meta.parser_type === "generic") return { state: "generic" };
+  const err = row["ext.parse_error"] ?? meta.parse_error;
+  if (typeof err === "string" && err !== "") return { state: "failed", error: err };
+  if (hasUdmFields(row)) return { state: "parsed" };
+  return { state: "unknown" };
 }
 
 const COUNT_SAMPLE_LIMIT = 100;
@@ -72,7 +155,19 @@ export async function countRecent(
   const end = new Date(Date.now() + 60_000).toISOString();
   const res = await client.search(`source_type="${sourceType}"`, start, end, COUNT_SAMPLE_LIMIT);
   const count = res.results.length;
-  return { count, capped: count >= COUNT_SAMPLE_LIMIT };
+  let parsed = 0;
+  let generic = 0;
+  let parseFailed = 0;
+  let parseError: string | undefined;
+  for (const row of res.results) {
+    const { state, error } = classifyRow(row);
+    if (state === "generic") generic++;
+    else if (state === "failed") {
+      parseFailed++;
+      parseError ??= error;
+    } else if (state === "parsed") parsed++;
+  }
+  return { count, capped: count >= COUNT_SAMPLE_LIMIT, parsed, generic, parseFailed, parseError };
 }
 
 function sleep(ms: number): Promise<void> {

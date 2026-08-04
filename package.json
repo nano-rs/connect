@@ -1,6 +1,6 @@
 {
   "name": "@nano-rs/connect",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Onboard a data source into nano — set up an edge Vector collector and verify your logs are flowing.",
   "license": "Apache-2.0",
   "type": "module",
@@ -51,6 +51,8 @@
   },
   "packageManager": "pnpm@10.33.0",
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }
