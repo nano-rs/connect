@@ -16,7 +16,7 @@ import {
 } from "./core/syslog.js";
 import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE } from "./core/vector.js";
-import { maybeRunHere } from "./runHere.js";
+import { maybeRunHere, type RunHereOutcome } from "./runHere.js";
 import { reviewParsers } from "./reviewParsers.js";
 import { orExit } from "./ui/ui.js";
 
@@ -153,7 +153,9 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
       "Where to send logs",
     );
   } else {
-    log.warn("No devices enabled — every listener is commented out. Uncomment what you need in vector.toml.");
+    log.warn(
+      `No devices enabled — every listener ships commented out. To enable one: uncomment its block in ${dir}/vector.toml AND its port (plus the \`ports:\` key) in docker-compose.yml, then \`docker compose up -d\`.`,
+    );
   }
 
   // Tell them which source_types nano already parses / offer to deploy a community parser.
@@ -165,16 +167,34 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
     });
   }
 
-  // Offer to pull the image and start it right here.
-  await maybeRunHere({ dir, container: COLLECTOR_CONTAINER, run: opts.run, nonInteractive: opts.nonInteractive });
+  // Offer to pull the image and start it right here — with no listeners enabled there's nothing
+  // to run yet, so skip the offer instead of starting a collector that listens on nothing.
+  let outcome: RunHereOutcome = "not-started";
+  if (selected.length > 0) {
+    outcome = await maybeRunHere({ dir, container: COLLECTOR_CONTAINER, run: opts.run, nonInteractive: opts.nonInteractive });
+  } else if (opts.run) {
+    log.info("Ignoring --run — no listeners are enabled yet (see the warning above).");
+  }
 
-  note(
-    [
-      `• Point devices     (table above) at this machine's IP`,
-      `• Confirm flow:      ${pc.cyan("npx @nano-rs/connect verify --source " + (selected[0]?.sourceType ?? "<source_type>"))}`,
-      `• (Re)start/stop:    ${pc.cyan("docker compose up -d")} / ${pc.cyan("down")} in ${dir}`,
-    ].join("\n"),
-    "Next",
-  );
-  outro(pc.green("Collector ready."));
+  const next =
+    selected.length > 0
+      ? [
+          `• Point devices     (table above) at this machine's IP`,
+          `• Confirm flow:      ${pc.cyan("npx @nano-rs/connect verify --source " + selected[0]!.sourceType)}`,
+          `• (Re)start/stop:    ${pc.cyan("docker compose up -d")} / ${pc.cyan("down")} in ${dir}`,
+        ]
+      : [
+          `• Enable a device:   uncomment it in ${dir}/vector.toml AND its port in docker-compose.yml`,
+          `• Start:             ${pc.cyan("docker compose up -d")} in ${dir}`,
+          `• Confirm flow:      ${pc.cyan("npx @nano-rs/connect verify --source <source_type>")}`,
+        ];
+  note(next.join("\n"), "Next");
+
+  if (outcome === "start-failed") {
+    outro(pc.yellow("Config written, but the collector didn't start — see the compose error above."));
+  } else if (selected.length === 0) {
+    outro(pc.yellow("Config written — enable a device (see Next) to start collecting."));
+  } else {
+    outro(pc.green("Collector ready."));
+  }
 }

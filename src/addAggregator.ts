@@ -136,7 +136,7 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
     });
   }
 
-  await maybeRunHere({ dir, container: AGGREGATOR_CONTAINER, run: opts.run, nonInteractive: opts.nonInteractive });
+  const outcome = await maybeRunHere({ dir, container: AGGREGATOR_CONTAINER, run: opts.run, nonInteractive: opts.nonInteractive });
 
   note(
     [
@@ -146,5 +146,9 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
     ].join("\n"),
     "Next",
   );
-  outro(pc.green("Aggregator ready."));
+  if (outcome === "start-failed") {
+    outro(pc.yellow("Config written, but the aggregator didn't start — see the compose error above."));
+  } else {
+    outro(pc.green("Aggregator ready."));
+  }
 }
