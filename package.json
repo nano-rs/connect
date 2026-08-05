@@ -1,6 +1,6 @@
 {
   "name": "@nano-rs/connect",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Onboard a data source into nano — set up an edge Vector collector and verify your logs are flowing.",
   "license": "Apache-2.0",
   "type": "module",

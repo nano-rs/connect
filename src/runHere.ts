@@ -11,11 +11,15 @@ export interface RunHereOptions {
   nonInteractive?: boolean;
 }
 
+/** "not-started" covers declined / Docker unavailable — the config is written either way. */
+export type RunHereOutcome = "started" | "start-failed" | "not-started";
+
 /**
  * Offer to pull the image and start the generated collector right here (docker compose), then
  * confirm it's healthy. Degrades gracefully when Docker is absent — the config is already written.
+ * The outcome lets callers close with an honest outro instead of an unconditional "ready".
  */
-export async function maybeRunHere(opts: RunHereOptions): Promise<void> {
+export async function maybeRunHere(opts: RunHereOptions): Promise<RunHereOutcome> {
   let go = opts.run ?? false;
   if (!opts.run && !opts.nonInteractive) {
     go = orExit(
@@ -25,21 +29,21 @@ export async function maybeRunHere(opts: RunHereOptions): Promise<void> {
       }),
     );
   }
-  if (!go) return;
+  if (!go) return "not-started";
 
   const docker = await dockerAvailable();
   if (!docker.ok) {
     log.warn(`${docker.reason} Skipping start — run \`docker compose up -d\` in ${opts.dir} when ready.`);
-    return;
+    return "not-started";
   }
 
   log.step(pc.dim("Pulling image and starting the container…"));
   const code = await composeUp(opts.dir);
   if (code !== 0) {
     log.error(
-      `docker compose exited ${code}. The config is fine — fix Docker and re-run \`docker compose up -d\` in ${opts.dir}.`,
+      `docker compose exited ${code} — see its output above for the cause. Fix it, then re-run \`docker compose up -d\` in ${opts.dir}.`,
     );
-    return;
+    return "start-failed";
   }
 
   const health = await waitHealthy(opts.container);
@@ -50,4 +54,5 @@ export async function maybeRunHere(opts: RunHereOptions): Promise<void> {
   } else {
     log.warn(`${opts.container} started but health is "${health}" after waiting. Inspect: docker logs ${opts.container}`);
   }
+  return "started";
 }

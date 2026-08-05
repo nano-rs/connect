@@ -159,12 +159,18 @@ export function buildDockerCompose(plan: SyslogPlan): string {
       ? `      - ${line}`
       : `      # - ${line}   # ${d.id}`;
   }).join("\n");
+  // With no device enabled every entry above is a comment, which YAML reads as `ports: null`
+  // and compose rejects ("ports must be a list") — so the key itself ships commented out.
+  const portsKey =
+    plan.selected.length > 0
+      ? "    ports:"
+      : "    # ports:   # ← uncomment this line together with a device port below";
 
   const { env, volumes } = composeUplinkLines(plan.uplink);
 
   return `# Run the nano edge collector as a container.
 #   docker compose up -d
-# Edit vector.toml to enable more device types, then add their ports below and re-run.
+# Edit vector.toml to enable more device types, then uncomment their ports below and re-run.
 services:
   nano-collector:
     image: ${plan.image}
@@ -174,7 +180,7 @@ services:
 ${env}    volumes:
       - ./vector.toml:/etc/vector/vector.toml:ro
 ${volumes}      - nano-collector-data:${VECTOR_DATA_DIR}
-    ports:
+${portsKey}
 ${ports}
       # metrics (9598) stay internal for the healthcheck; uncomment to scrape from the host:
       # - "9598:9598"
@@ -267,8 +273,9 @@ Replace "this machine's IP" with the collector host's address reachable from you
 
 ## 3. Enable more device types
 
-Uncomment the device's block in \`vector.toml\` (the sink picks it up automatically), expose its
-port in \`docker-compose.yml\`, and re-run \`docker compose up -d\`.
+Uncomment the device's block in \`vector.toml\` (the sink picks it up automatically), then
+uncomment its port in \`docker-compose.yml\` — including the \`ports:\` key itself if it's still
+commented out — and re-run \`docker compose up -d\`.
 
 ## 4. Confirm data is arriving
 
