@@ -5,7 +5,8 @@ import { writeArtifacts } from "./core/artifacts.js";
 import { SYSLOG_CATALOG } from "./core/catalog.js";
 import { resolveSavedConnection } from "./core/connection.js";
 import { buildIngestEnvFile, MTLS_SECRET_FILES, mtlsArtifacts, resolveUplink } from "./core/uplink.js";
-import { unauthenticatedVectorWarning, validateHost, validatePort } from "./core/target.js";
+import { validateHost, validatePort } from "./core/target.js";
+import { preflightNativeUplink } from "./preflight.js";
 import {
   buildDockerCompose,
   buildReadme,
@@ -102,15 +103,12 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
   });
 
   if (uplink.transport === "native") {
-    // The native port carries no ingest token — TLS protects the data in transit, but anyone who
-    // can reach the port can also write to it. Say so plainly.
-    const warning = unauthenticatedVectorWarning(conn.baseUrl, nanoHost, nanoPort);
-    if (warning) log.warn(warning);
     log.info(
       `Transport: Vector-native + TLS → ${nanoHost}:${nanoPort}${
         uplink.tls.mtls ? ` (client certificate from ${uplink.mtlsDir})` : ""
       }. Use ${pc.cyan("--transport http")} for a token-authenticated uplink.`,
     );
+    await preflightNativeUplink(uplink, conn.baseUrl);
   } else {
     log.info(`Transport: HTTPS → ${uplink.ingestUrl} (authenticated with your ingest token).`);
   }

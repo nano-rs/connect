@@ -13,7 +13,8 @@ import { writeArtifacts } from "./core/artifacts.js";
 import { SYSLOG_CATALOG } from "./core/catalog.js";
 import { resolveSavedConnection } from "./core/connection.js";
 import { buildIngestEnvFile, MTLS_SECRET_FILES, mtlsArtifacts, resolveUplink } from "./core/uplink.js";
-import { unauthenticatedVectorWarning, validateHost, validatePort } from "./core/target.js";
+import { validateHost, validatePort } from "./core/target.js";
+import { preflightNativeUplink } from "./preflight.js";
 import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE } from "./core/vector.js";
 import { maybeRunHere } from "./runHere.js";
@@ -85,13 +86,12 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
   });
 
   if (uplink.transport === "native") {
-    const warning = unauthenticatedVectorWarning(conn.baseUrl, nanoHost, nanoPort);
-    if (warning) log.warn(warning);
     log.info(
       `Transport: Vector-native + TLS → ${nanoHost}:${nanoPort}${
         uplink.tls.mtls ? ` (client certificate from ${uplink.mtlsDir})` : ""
       }.`,
     );
+    await preflightNativeUplink(uplink, conn.baseUrl);
   } else {
     log.info(`Transport: HTTPS → ${uplink.ingestUrl} (authenticated with your ingest token).`);
     log.warn(

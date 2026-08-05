@@ -24,6 +24,7 @@ function transportDoc(uplink: NanoUplink): string {
     ? `Vector-native, TLS${uplink.tls.mtls ? " + client certificate" : ""}`
     : "Vector-native, on your network";
 }
+import { preflightNativeUplink } from "./preflight.js";
 import { reviewParsers } from "./reviewParsers.js";
 import { orExit } from "./ui/ui.js";
 
@@ -85,6 +86,7 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
           }.`
         : `Transport: Vector-native → ${uplink.target.host}:${uplink.target.port} (your aggregator; the nano uplink is secured on the aggregator itself).`,
     );
+    await preflightNativeUplink(uplink, conn.baseUrl);
   } else {
     log.info(`Transport: HTTPS → ${uplink.ingestUrl} (authenticated with your ingest token).`);
   }
