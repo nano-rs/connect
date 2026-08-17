@@ -22,7 +22,7 @@ npx @nano-rs/connect
 | `connect add-aggregator` | Generate an **aggregator** that fans endpoint agents (and syslog) into nano. |
 | `connect verify --source <type>` | Check whether a source_type is arriving, and whether a parser actually normalized it. |
 | `connect sync-parsers` | Refresh the community parser catalog (registers the official repo if there is none). |
-| `connect list-sources` | List the built-in syslog source_types (what you pass to `--sources`). |
+| `connect list-sources` | List the syslog source_types you can pass to `--sources` — built-ins **plus whatever your instance already parses**. |
 
 Every generator can `--run` to pull the Vector image and start the collector right there, and
 `--deploy-parsers` to auto-deploy the matching community parser.
@@ -48,7 +48,7 @@ syslog devices ─────┘        (or straight to nano for small setups)
 npx @nano-rs/connect connect
 
 # 2. Stand up a syslog collector for your firewalls and start it here
-npx @nano-rs/connect list-sources          # which source_types are built in
+npx @nano-rs/connect list-sources          # built-ins + what your instance already parses
 npx @nano-rs/connect add-source --sources cisco_asa,palo_alto --run --deploy-parsers
 
 # 3. Point your devices at <this-host>:5514, then confirm
@@ -177,6 +177,70 @@ The bundle is copied into `tls/` inside the generated artifact and referenced fr
 you to copy it to. `client.key` is written `0600`. Your source directory is never mounted into the
 container.
 
+## Source types come from your instance, not just this CLI
+
+Nine common vendors ship curated here (vetted port, correct transport, vendor notes). Everything
+else comes from **your** nano: `add-source`, `add-aggregator`, and `list-sources` read the parser
+registry and present three tiers.
+
+```bash
+npx @nano-rs/connect list-sources
+#   Built-in
+#     cisco_asa           5514/udp  Cisco ASA / FTD firewall
+#     …
+#   From your instance (parsers you have deployed; ports assigned by connect)
+#     mikrotik_routeros   5697/udp  MikroTik RouterOS  (also: routeros, mikrotik)
+#   Available in the community catalog (not imported yet — selecting one imports its parser)
+#     suricata              —       Suricata IDS/IPS  [security]
+#     zeek                  —       Zeek Network Monitor  [network]
+#     …
+
+npx @nano-rs/connect add-source --sources routeros
+```
+
+So importing the community MikroTik parser is enough to make its source_type collectable — and a
+parser you *haven't* imported is still selectable, with the import offered right after the
+listener is generated.
+
+Any `match_value` the parser routes on works as the name: `routeros` and `mikrotik` both resolve
+to the entry above, and the generated config stamps the canonical one.
+
+### What's *not* offered
+
+`add-source` generates a syslog listener, so the community tier only lists sources that can
+actually arrive that way. CloudTrail, Okta, Sysmon and friends are parsed by nano perfectly well —
+they just reach it by API poll, HTTP push, or an endpoint agent, never by pointing a device at a
+UDP port. Asking for one is refused rather than handed a listener that stays silent forever:
+
+```
+✖ Can't collect over syslog:
+  sysmon is an `endpoint` source — collect it with `connect add-agent` on the endpoint.
+```
+
+A parser declares this itself with `transports:` in its YAML, which is authoritative:
+
+```yaml
+name: okta
+category: security
+transports: [api]      # never offered for a syslog listener
+```
+
+Parsers that don't declare it yet fall back to their `category` (`network` / `security` /
+`generic` count as syslog-collectable). That fallback is coarse — `category` describes what a
+source *is*, not how it reaches you — so a `security` parser that's really API-only stays listed
+until the repo annotates it.
+
+### Caveats on discovered types
+
+The registry has no transport detail, so the port is assigned by
+`connect` (stably — it's derived from the name, so importing other parsers won't renumber a
+listener your devices already point at) and the mode defaults to UDP; override with
+`--sources <type>:tcp`. And an unattended `--non-interactive` run without `--sources` enables only
+the built-ins — opening a port for every parser on your instance isn't something to do unasked.
+
+If the registry isn't readable (no saved key, missing parser scopes, offline), everything still
+works against the built-ins and says so.
+
 ## Common flags
 
 - `--url <baseUrl>` — your nano URL (defaults to your saved connection)
@@ -184,7 +248,8 @@ container.
 - `--non-interactive` — for CI/scripts (fails instead of prompting)
 - `--run` — pull the image and start the collector here
 - `--deploy-parsers` — auto-deploy available community parsers
-- `--sources a,b` (add-source / add-aggregator) — which source_types to collect
+- `--sources a,b` (add-source / add-aggregator) — which source_types to collect; append `:tcp` /
+  `:udp` to pin a listener's transport (e.g. `pfsense:tcp`)
 - `--target host:port` / `--to-nano` (add-agent) — where an agent ships
 - `--transport native|http` — how the collector reaches nano (see [Transports](#transports))
 - `--mtls-dir <dir>` — where to find the mTLS bundle (default: the directory you're running in)

@@ -6,7 +6,7 @@ import { type AddAggregatorOptions, runAddAggregator } from "./addAggregator.js"
 import { type AddSourceOptions, runAddSource } from "./addSource.js";
 import { type ConnectOptions, runConnect } from "./flow.js";
 import { NanoApiError } from "./core/types.js";
-import { SYSLOG_CATALOG } from "./core/catalog.js";
+import { runListSources } from "./listSources.js";
 import { runSyncParsers } from "./syncParsers.js";
 import { type VerifyOptions, runVerify } from "./verifyCmd.js";
 
@@ -68,12 +68,12 @@ program
   .option("--mtls-dir <dir>", "where to find the Vector mTLS bundle (default: the current directory — just drop ca.crt, client.crt, client.key in)")
   .option("--ingest-url <url>", "override the ingest endpoint used by --transport http")
   .option("--ingest-token <token>", "ingest token for --transport http (defaults to your saved connection)")
-  .option("--sources <ids>", "comma-separated source_types to collect — see `connect list-sources` (e.g. cisco_asa,palo_alto)")
+  .option("--sources <ids>", "comma-separated source_types to collect, `:tcp`/`:udp` to pin transport — see `connect list-sources` (e.g. cisco_asa,routeros:tcp)")
   .addOption(new Option("--devices <ids>", "deprecated alias for --sources").hideHelp())
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/syslog)")
   .option("--run", "pull the image and start the collector here after generating")
   .option("--deploy-parsers", "auto-deploy available community parsers for your sources")
-  .option("--non-interactive", "with no --sources, enable every source_type in the catalog instead of prompting")
+  .option("--non-interactive", "with no --sources, enable every built-in source_type instead of prompting")
   .action(async (raw: Record<string, unknown>) => {
     const opts: AddSourceOptions = {
       url: raw.url as string | undefined,
@@ -154,7 +154,7 @@ program
   .option("--ingest-url <url>", "override the ingest endpoint used by --transport http")
   .option("--ingest-token <token>", "ingest token for --transport http (defaults to your saved connection)")
 
-  .option("--sources <ids>", "comma-separated syslog source_types to also listen for — see `connect list-sources`")
+  .option("--sources <ids>", "comma-separated syslog source_types to also listen for, `:tcp`/`:udp` to pin transport — see `connect list-sources`")
   .addOption(new Option("--devices <ids>", "deprecated alias for --sources").hideHelp())
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/aggregator)")
   .option("--run", "pull the image and start the aggregator here after generating")
@@ -210,24 +210,22 @@ program
 program
   .command("list-sources")
   .alias("list-devices")
-  .description("List the built-in syslog source_types you can pass to --sources.")
-  .action(() => {
-    console.log(
-      `\n${pc.bold("Syslog source_types")} — pass these to ${pc.cyan("--sources")} on add-source / add-aggregator.\n` +
-        `Each gets its own listener port so nano can tell the vendors apart.\n`,
-    );
-    const w = Math.max(...SYSLOG_CATALOG.map((d) => d.id.length));
-    for (const d of SYSLOG_CATALOG) {
-      console.log(
-        `  ${pc.cyan(d.id.padEnd(w))}  ${String(d.port).padStart(5)}/${d.mode.padEnd(3)}  ${d.label}` +
-          `${d.sourceType !== d.id ? pc.dim(`  (source_type ${d.sourceType})`) : ""}`,
-      );
-      if (d.note) console.log(`  ${" ".repeat(w)}  ${pc.dim(d.note)}`);
+  .description("List the syslog source_types you can pass to --sources (built-ins + your instance's).")
+  .option("--url <baseUrl>", "nano base URL (defaults to your saved connection)")
+  .option("--api-key <key>", "nano API key (defaults to your saved connection)")
+  .option("--env-file <path>", "path to a nano install .env to read connection details from")
+  .option("--builtin-only", "skip the instance lookup and list only the curated built-ins")
+  .action(async (raw: Record<string, unknown>) => {
+    try {
+      await runListSources({
+        url: raw.url as string | undefined,
+        apiKey: raw.apiKey as string | undefined,
+        envFile: raw.envFile as string | undefined,
+        builtinOnly: Boolean(raw.builtinOnly),
+      });
+    } catch (err) {
+      fail(err);
     }
-    console.log(
-      `\n${pc.dim("e.g.")}  connect add-source --sources ${SYSLOG_CATALOG.slice(0, 2).map((d) => d.id).join(",")}\n` +
-        `${pc.dim("Not listed? Copy a block in the generated vector.toml and change id/port/mode/source_type.")}\n`,
-    );
   });
 
 program
