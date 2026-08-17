@@ -1,7 +1,13 @@
 import { confirm, log, note } from "@clack/prompts";
 import pc from "picocolors";
 import type { NanoClient } from "./core/api.js";
-import { classify, deployParser, loadParserContext, type ParserStatus } from "./core/parsers.js";
+import {
+  classify,
+  deployParser,
+  loadParserContext,
+  type ParserContext,
+  type ParserStatus,
+} from "./core/parsers.js";
 import { NanoApiError } from "./core/types.js";
 import { orExit } from "./ui/ui.js";
 
@@ -9,6 +15,8 @@ export interface ReviewParsersOptions {
   /** Deploy available community parsers without prompting. */
   deployParsers?: boolean;
   nonInteractive?: boolean;
+  /** Coverage already fetched by the caller (source selection needs it too) — avoids a refetch. */
+  ctx?: ParserContext;
 }
 
 /**
@@ -24,7 +32,7 @@ export async function reviewParsers(
   const unique = [...new Set(sourceTypes.filter(Boolean))];
   if (unique.length === 0) return;
 
-  const ctx = await loadParserContext(client);
+  const ctx = opts.ctx ?? (await loadParserContext(client));
   if (!ctx.ok) {
     log.info(
       pc.dim("Skipped parser coverage check (your API key can't read parsers). Data still flows; re-run `connect` to mint a key with parser scopes."),

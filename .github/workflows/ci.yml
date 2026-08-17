@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # GitHub-hosted on purpose: this repo has no self-hosted runners registered, and a public
+    # repo gets hosted minutes for free. Switch to self-hosted only after registering one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # NOT the `engines.node` floor (18): the test script passes a glob to `--test`, which
+          # only expands on Node 21+. engines constrains users installing the CLI, not the dev
+          # toolchain, so this tracks current LTS instead.
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm typecheck
+
+      - run: pnpm test
+
+      # The published artifact is dist/, built by prepublishOnly — so a build break is a release
+      # break even when typecheck passes.
+      - run: pnpm build

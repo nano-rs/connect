@@ -1,4 +1,4 @@
-import { intro, log, multiselect, note, outro, spinner } from "@clack/prompts";
+import { intro, log, note, outro, spinner } from "@clack/prompts";
 import pc from "picocolors";
 import {
   AGENT_SOURCE_TYPES,
@@ -10,16 +10,14 @@ import {
 } from "./core/aggregator.js";
 import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
-import { SYSLOG_CATALOG } from "./core/catalog.js";
 import { resolveSavedConnection } from "./core/connection.js";
+import { selectSyslogSources } from "./selectSources.js";
 import { buildIngestEnvFile, MTLS_SECRET_FILES, mtlsArtifacts, resolveUplink } from "./core/uplink.js";
 import { validateHost, validatePort } from "./core/target.js";
 import { preflightNativeUplink } from "./preflight.js";
-import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE } from "./core/vector.js";
 import { maybeRunHere } from "./runHere.js";
 import { reviewParsers } from "./reviewParsers.js";
-import { orExit } from "./ui/ui.js";
 
 export interface AddAggregatorOptions {
   url?: string;
@@ -52,25 +50,20 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
 
   intro(pc.inverse(" nano connect · add aggregator "));
 
-  // Syslog devices the aggregator should also listen for (optional).
-  let selectedIds: string[] = [];
-  if (opts.sources !== undefined) {
-    selectedIds = opts.sources.split(",").map((s) => s.trim()).filter(Boolean);
-    const known = new Set(SYSLOG_CATALOG.map((d) => d.id));
-    const unknown = selectedIds.filter((id) => !known.has(id));
-    if (unknown.length) {
-      throw new NanoApiError(`Unknown source_type(s): ${unknown.join(", ")}. Run \`connect list-sources\` to see the ${SYSLOG_CATALOG.length} built-ins.`);
-    }
-  } else if (!opts.nonInteractive) {
-    selectedIds = orExit(
-      await multiselect({
-        message: "Any syslog devices to listen for here too? (optional — the rest ship commented-out)",
-        required: false,
-        options: SYSLOG_CATALOG.map((d) => ({ value: d.id, label: d.label, hint: `${d.mode} :${d.port}` })),
-      }),
-    ) as string[];
-  }
-  const syslogSelected = SYSLOG_CATALOG.filter((d) => selectedIds.includes(d.id));
+  // Syslog devices the aggregator should also listen for (optional). Built from the instance's
+  // parser registry, so an imported source_type is selectable by name.
+  const client = conn.apiKey ? new NanoClient(conn.baseUrl, { apiKey: conn.apiKey }) : undefined;
+  const {
+    catalog: syslogCatalog,
+    selected: syslogSelected,
+    ctx,
+  } = await selectSyslogSources({
+    sources: opts.sources,
+    nonInteractive: opts.nonInteractive,
+    client,
+    defaultWhenNonInteractive: "none",
+    promptMessage: "Any syslog devices to listen for here too? (optional — the rest ship commented-out)",
+  });
 
   if (opts.vectorHost !== undefined) validateHost(opts.vectorHost, "--vector-host");
   const nanoHost = opts.vectorHost ?? new URL(conn.baseUrl).hostname;
@@ -103,6 +96,7 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
 
   const plan: AggregatorPlan = {
     agentPort,
+    syslogCatalog,
     syslogSelected,
     uplink,
     bufferBytes: BUFFER_BYTES,
@@ -128,11 +122,11 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
   );
   s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
 
-  if (conn.apiKey && syslogSelected.length > 0) {
-    const client = new NanoClient(conn.baseUrl, { apiKey: conn.apiKey });
+  if (client && syslogSelected.length > 0) {
     await reviewParsers(client, syslogSelected.map((d) => d.sourceType), {
       deployParsers: opts.deployParsers,
       nonInteractive: opts.nonInteractive,
+      ctx,
     });
   }
 

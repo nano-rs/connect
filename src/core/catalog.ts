@@ -1,5 +1,10 @@
 /**
- * Catalog of common syslog-emitting device types.
+ * Curated catalog of common syslog-emitting device types.
+ *
+ * This is the *baseline*, not the whole story: `discovery.ts` extends it at runtime with whatever
+ * parsers the connected instance actually has deployed, so a source_type you imported (say
+ * `routeros`) is offerable without anyone editing this file. Entries here stay authoritative
+ * where they overlap — they carry a vetted port, the right transport mode, and vendor notes.
  *
  * Each gets its own listener port (port-per-source) because (a) Vector's `syslog` source binds
  * one address + one mode + one framing, so vendors that differ in protocol/framing can't share a
@@ -19,6 +24,14 @@ export interface DeviceType {
   port: number;
   mode: "udp" | "tcp";
   note?: string;
+  /**
+   * Where this entry came from. "builtin" is the curated list below; "discovered" is synthesized
+   * from a parser actually deployed on the connected instance (see discovery.ts) — its port is
+   * assigned by us, not vetted against the vendor's defaults.
+   */
+  origin?: "builtin" | "discovered";
+  /** Other `match_values` the instance's parser routes on. Accepted by --sources, not stamped. */
+  aliases?: string[];
 }
 
 export const SYSLOG_CATALOG: DeviceType[] = [

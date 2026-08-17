@@ -37,7 +37,7 @@ function matches(sourceType: string, name?: string, matchValues?: string[] | nul
  * endpoint leaves match_values null, so aliases are parsed out of the raw_content YAML
  * (e.g. "match_values:\n  - cisco_asa\n  - asa").
  */
-function repoMatchValues(p: RepositoryParser): string[] {
+export function repoMatchValues(p: RepositoryParser): string[] {
   const vals: string[] = [];
   if (p.name) vals.push(p.name);
   if (p.match_values) vals.push(...p.match_values);

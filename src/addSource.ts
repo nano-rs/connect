@@ -1,9 +1,9 @@
-import { intro, log, multiselect, note, outro, spinner, text } from "@clack/prompts";
+import { intro, log, note, outro, spinner } from "@clack/prompts";
 import pc from "picocolors";
 import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
-import { SYSLOG_CATALOG } from "./core/catalog.js";
 import { resolveSavedConnection } from "./core/connection.js";
+import { selectSyslogSources } from "./selectSources.js";
 import { buildIngestEnvFile, MTLS_SECRET_FILES, mtlsArtifacts, resolveUplink } from "./core/uplink.js";
 import { validateHost, validatePort } from "./core/target.js";
 import { preflightNativeUplink } from "./preflight.js";
@@ -15,11 +15,9 @@ import {
   COLLECTOR_CONTAINER,
   type SyslogPlan,
 } from "./core/syslog.js";
-import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE } from "./core/vector.js";
 import { maybeRunHere, type RunHereOutcome } from "./runHere.js";
 import { reviewParsers } from "./reviewParsers.js";
-import { orExit } from "./ui/ui.js";
 
 export interface AddSourceOptions {
   url?: string;
@@ -56,37 +54,18 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
 
   intro(pc.inverse(" nano connect · add syslog source "));
 
-  // Which devices to enable now (the rest ship commented-out for later).
-  let selectedIds: string[];
-  if (opts.sources !== undefined) {
-    selectedIds = opts.sources.split(",").map((s) => s.trim()).filter(Boolean);
-    const known = new Set(SYSLOG_CATALOG.map((d) => d.id));
-    const unknown = selectedIds.filter((id) => !known.has(id));
-    if (unknown.length) {
-      throw new NanoApiError(
-        `Unknown source_type(s): ${unknown.join(", ")}. Run \`connect list-sources\` to see the ${SYSLOG_CATALOG.length} built-ins.`,
-      );
-    }
-  } else if (opts.nonInteractive) {
-    selectedIds = SYSLOG_CATALOG.map((d) => d.id);
-    log.warn(
-      `Non-interactive with no --sources: enabling ALL ${SYSLOG_CATALOG.length} source_types and opening their ports. Pass --sources a,b to narrow.`,
-    );
-  } else {
-    selectedIds = orExit(
-      await multiselect({
-        message: "Which devices will send syslog? (the rest ship commented-out to enable later)",
-        required: false,
-        options: SYSLOG_CATALOG.map((d) => ({
-          value: d.id,
-          label: d.label,
-          hint: `${d.mode} :${d.port}`,
-        })),
-      }),
-    ) as string[];
-  }
-  // Preserve catalog order regardless of how ids were supplied.
-  const selected = SYSLOG_CATALOG.filter((d) => selectedIds.includes(d.id));
+  // Which devices to enable now (the rest ship commented-out for later). The catalog is built
+  // from the instance's parser registry, so an imported source_type is selectable by name.
+  const client = conn.apiKey
+    ? new NanoClient(conn.baseUrl, { apiKey: conn.apiKey, searchUrl: conn.searchUrl })
+    : undefined;
+  const { catalog, selected, ctx } = await selectSyslogSources({
+    sources: opts.sources,
+    nonInteractive: opts.nonInteractive,
+    client,
+    defaultWhenNonInteractive: "curated",
+    promptMessage: "Which devices will send syslog? (the rest ship commented-out to enable later)",
+  });
 
   // nano's Vector-native target. URL-derived hostname is already sanitized; a raw --vector-host
   // is interpolated into the generated TOML, so validate it can't break out of the string.
@@ -114,6 +93,7 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
   }
 
   const plan: SyslogPlan = {
+    catalog,
     selected,
     uplink,
     bufferBytes: DEFAULT_BUFFER_BYTES,
@@ -157,11 +137,11 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
   }
 
   // Tell them which source_types nano already parses / offer to deploy a community parser.
-  if (conn.apiKey) {
-    const client = new NanoClient(conn.baseUrl, { apiKey: conn.apiKey, searchUrl: conn.searchUrl });
+  if (client) {
     await reviewParsers(client, selected.map((d) => d.sourceType), {
       deployParsers: opts.deployParsers,
       nonInteractive: opts.nonInteractive,
+      ctx,
     });
   }
 

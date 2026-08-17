@@ -1,5 +1,4 @@
 import type { DeviceType } from "./catalog.js";
-import { SYSLOG_CATALOG } from "./catalog.js";
 import { composeUplinkLines, type NanoUplink } from "./uplink.js";
 import { commentOut, httpSinks, metricsSection, VECTOR_DATA_DIR, vectorSink } from "./vector.js";
 
@@ -7,6 +6,11 @@ import { commentOut, httpSinks, metricsSection, VECTOR_DATA_DIR, vectorSink } fr
 export const COLLECTOR_CONTAINER = "nano-collector";
 
 export interface SyslogPlan {
+  /**
+   * Every device type this config knows about: the curated builtins plus any discovered from the
+   * instance that were selected. Selected ones render active, the rest ship commented-out.
+   */
+  catalog: DeviceType[];
   /** Devices the operator chose to enable now (rendered active). */
   selected: DeviceType[];
   /** How this collector reaches nano (native+TLS or HTTP). */
@@ -26,7 +30,14 @@ export function uplinkLabel(u: NanoUplink): string {
 
 /** One device's source + source_type-stamping transform. */
 function deviceBlock(d: DeviceType): string {
-  return `[sources.${d.id}]
+  const provenance =
+    d.origin === "discovered"
+      ? `# Discovered from your nano instance — it has a parser deployed that routes on
+# "${d.sourceType}". The port below was assigned by \`connect\` (the parser registry carries no
+# transport detail), so pick any free port you prefer; only .source_type has to match.
+`
+      : "";
+  return `${provenance}[sources.${d.id}]
 # A raw socket, NOT Vector's \`syslog\` source, on purpose. nano's parsers are written against the
 # syslog WIRE format: cisco_asa matches "<ts> <host> %ASA-<sev>-<id>: ..." and strips the <PRI>
 # itself. Vector's syslog source pre-parses that envelope and hands on only the message body, so
@@ -53,12 +64,18 @@ source = '''
  * Render the syslog device catalog: selected devices active, the rest commented-out for later.
  * Shared by the standalone syslog collector and the aggregator (which also listens for syslog).
  */
-export function renderSyslogDevices(selected: DeviceType[]): { active: string; commented: string } {
+export function renderSyslogDevices(
+  catalog: DeviceType[],
+  selected: DeviceType[],
+): { active: string; commented: string } {
   const selectedIds = new Set(selected.map((d) => d.id));
-  const active = SYSLOG_CATALOG.filter((d) => selectedIds.has(d.id))
+  // Render the SELECTED entries, not the catalog's copy of them — a `--sources id:tcp` override
+  // lives on the selection and would otherwise be silently dropped back to the catalog default.
+  const active = selected
     .map((d) => `# --- ${d.label} (${d.mode} :${d.port}) ---\n${deviceBlock(d)}`)
     .join("\n\n");
-  const commented = SYSLOG_CATALOG.filter((d) => !selectedIds.has(d.id))
+  const commented = catalog
+    .filter((d) => !selectedIds.has(d.id))
     .map((d) => {
       const header = `# --- ${d.label} (${d.mode} :${d.port}) — uncomment to enable ---`;
       const note = d.note ? `# note: ${d.note}\n` : "";
@@ -69,7 +86,7 @@ export function renderSyslogDevices(selected: DeviceType[]): { active: string; c
 }
 
 export function buildVectorToml(plan: SyslogPlan, generatedAt: string): string {
-  const { active, commented } = renderSyslogDevices(plan.selected);
+  const { active, commented } = renderSyslogDevices(plan.catalog, plan.selected);
 
   // A sink whose input glob matches nothing fails to load, so when no device is enabled we ship
   // the sink commented-out (the metrics chain keeps the file valid) with instructions.
@@ -121,7 +138,10 @@ export function buildVectorToml(plan: SyslogPlan, generatedAt: string): string {
 # Collects syslog from your devices and forwards to nano.
 ${transportNotes}
 #
-# To add a vendor that isn't listed, copy a block and change the id, port, mode, and source_type.
+# To add a vendor that isn't listed: if nano has (or can import) a parser for it, prefer
+#   connect add-source --sources <source_type>
+# which reads your instance's parser registry and generates the block for you. Failing that, copy
+# a block below and change the id, port, mode, and source_type by hand.
 
 data_dir = "${VECTOR_DATA_DIR}"
 
@@ -153,12 +173,12 @@ export function buildDockerCompose(plan: SyslogPlan): string {
   const selectedIds = new Set(plan.selected.map((d) => d.id));
   // List every catalog port; comment the ones not enabled so uncommenting stays symmetric with
   // vector.toml (enable a device there -> uncomment its port here -> re-run).
-  const ports = SYSLOG_CATALOG.map((d) => {
-    const line = `"${d.port}:${d.port}/${d.mode}"`;
-    return selectedIds.has(d.id)
-      ? `      - ${line}`
-      : `      # - ${line}   # ${d.id}`;
-  }).join("\n");
+  const ports = plan.catalog
+    .map((d) => {
+      const line = `"${d.port}:${d.port}/${d.mode}"`;
+      return selectedIds.has(d.id) ? `      - ${line}` : `      # - ${line}   # ${d.id}`;
+    })
+    .join("\n");
   // With no device enabled every entry above is a comment, which YAML reads as `ports: null`
   // and compose rejects ("ports must be a list") — so the key itself ships commented out.
   const portsKey =

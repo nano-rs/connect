@@ -1,5 +1,4 @@
 import type { DeviceType } from "./catalog.js";
-import { SYSLOG_CATALOG } from "./catalog.js";
 import { renderSyslogDevices, uplinkLabel } from "./syslog.js";
 import { composeUplinkLines, type NanoUplink } from "./uplink.js";
 import { httpSinks, metricsSection, VECTOR_DATA_DIR, vectorSink } from "./vector.js";
@@ -10,6 +9,8 @@ export const AGGREGATOR_CONTAINER = "nano-aggregator";
 export interface AggregatorPlan {
   /** Port endpoint agents ship to (Vector-native source). */
   agentPort: number;
+  /** Every syslog device type this config knows about (curated + selected discovered). */
+  syslogCatalog: DeviceType[];
   /** Syslog devices to also listen for on the aggregator (optional). */
   syslogSelected: DeviceType[];
   /** How the aggregator reaches nano. */
@@ -54,7 +55,7 @@ ${routes}`;
 }
 
 export function buildAggregatorToml(plan: AggregatorPlan, generatedAt: string): string {
-  const { active, commented } = renderSyslogDevices(plan.syslogSelected);
+  const { active, commented } = renderSyslogDevices(plan.syslogCatalog, plan.syslogSelected);
 
   const uplinkSection =
     plan.uplink.transport === "native"
@@ -125,10 +126,12 @@ ${metricsSection()}
 
 export function buildAggregatorCompose(plan: AggregatorPlan): string {
   const selectedIds = new Set(plan.syslogSelected.map((d) => d.id));
-  const syslogPorts = SYSLOG_CATALOG.map((d) => {
-    const line = `"${d.port}:${d.port}/${d.mode}"`;
-    return selectedIds.has(d.id) ? `      - ${line}` : `      # - ${line}   # ${d.id}`;
-  }).join("\n");
+  const syslogPorts = plan.syslogCatalog
+    .map((d) => {
+      const line = `"${d.port}:${d.port}/${d.mode}"`;
+      return selectedIds.has(d.id) ? `      - ${line}` : `      # - ${line}   # ${d.id}`;
+    })
+    .join("\n");
 
   const { env, volumes } = composeUplinkLines(plan.uplink);
 
