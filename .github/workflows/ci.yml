@@ -24,8 +24,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # Matches the `engines.node` floor in package.json.
-          node-version: 20
+          # NOT the `engines.node` floor (18): the test script passes a glob to `--test`, which
+          # only expands on Node 21+. engines constrains users installing the CLI, not the dev
+          # toolchain, so this tracks current LTS instead.
+          node-version: 22
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
