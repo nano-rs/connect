@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type { SavedSourceToken } from "./ingestTokens.js";
 
 /**
  * Persisted connection profile so repeat runs don't re-prompt. Stored at
@@ -27,6 +28,11 @@ export interface InstanceProfile {
    * uplink against the proven URL instead of re-guessing the candidate list.
    */
   ingestUrl?: string;
+  /**
+   * Ingest tokens connect issued, per source_type, each bound to one nano log source (NAN-3806).
+   * nano shows a token's value once, so this is the only place it can be reused from.
+   */
+  sourceTokens?: Record<string, SavedSourceToken>;
 }
 
 interface ProfileFile {
@@ -129,6 +135,17 @@ export function saveInstance(baseUrl: string, update: InstanceProfile): void {
   const data = readFile();
   data.instances[baseUrl] = { ...(data.instances[baseUrl] ?? {}), ...update };
   data.current = baseUrl;
+  writeFile(data);
+}
+
+/** Remember (or forget, with `undefined`) the token connect issued for one source_type. */
+export function saveSourceToken(baseUrl: string, sourceType: string, token: SavedSourceToken | undefined): void {
+  const data = readFile();
+  const instance = data.instances[baseUrl] ?? {};
+  const tokens = { ...(instance.sourceTokens ?? {}) };
+  if (token) tokens[sourceType] = token;
+  else delete tokens[sourceType];
+  data.instances[baseUrl] = { ...instance, sourceTokens: tokens };
   writeFile(data);
 }
 

@@ -1,8 +1,8 @@
 /**
  * Permission scopes the CLI needs on the API key it mints.
  *
- * Note: there is NO `logs:ingest` scope in nano — log ingestion is authenticated by the
- * separate VECTOR_AUTH_TOKEN (a Vector sink secret), not by an API key. The API key here is
+ * Note: there is NO `logs:ingest` scope in nano — log ingestion is authenticated by ingest
+ * tokens (one bound to each log source, NAN-3806), not by an API key. The API key here is
  * only for talking to the nano API: running the verify search and matching parsers/log sources.
  */
 export const REQUIRED_SCOPES = [
@@ -30,7 +30,17 @@ export const ELEVATED_SCOPES = [
   "log_sources:deploy", // activate it on the instance
 ] as const;
 
-export type Scope = (typeof REQUIRED_SCOPES)[number] | (typeof ELEVATED_SCOPES)[number];
+/**
+ * Issuing and binding ingest tokens (`POST /api/ingest-tokens`, `…/{credential_id}/bind`) for the
+ * HTTP transport: nano binds every token to one log source, so connect issues one per source.
+ * Admin-only on nano; best-effort, its own tier so a non-admin still gets parser deploy.
+ */
+export const TOKEN_SCOPES = ["settings:system"] as const;
+
+export type Scope =
+  | (typeof REQUIRED_SCOPES)[number]
+  | (typeof ELEVATED_SCOPES)[number]
+  | (typeof TOKEN_SCOPES)[number];
 
 /** Human-readable explanation per scope, shown before minting a key. */
 export const SCOPE_DESCRIPTIONS: Record<string, string> = {
@@ -43,4 +53,5 @@ export const SCOPE_DESCRIPTIONS: Record<string, string> = {
   "log_sources:create": "create the log source that parser becomes",
   "source_configs:edit": "publish the routing config so your source_type reaches that parser",
   "log_sources:deploy": "activate that parser so your logs get normalized",
+  "settings:system": "issue an ingest token bound to each log source you send over HTTP",
 };

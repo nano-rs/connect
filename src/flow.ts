@@ -14,9 +14,10 @@ import pc from "picocolors";
 import { NanoClient } from "./core/api.js";
 import { ingestCandidates, isInsecureRemote, normalizeBaseUrl } from "./core/endpoints.js";
 import { findEnvFile } from "./core/env.js";
-import { sendTestEvent } from "./core/ingest.js";
+import { probeIngestEndpoint, sendTestEvent } from "./core/ingest.js";
+import { detectIngestModel, type IngestModel, ingestRejectionMessage } from "./core/ingestTokens.js";
 import { currentBaseUrl, knownInstances, loadInstance, saveInstance } from "./core/profile.js";
-import { ELEVATED_SCOPES, REQUIRED_SCOPES, SCOPE_DESCRIPTIONS } from "./core/scopes.js";
+import { ELEVATED_SCOPES, REQUIRED_SCOPES, SCOPE_DESCRIPTIONS, TOKEN_SCOPES } from "./core/scopes.js";
 import { NanoApiError } from "./core/types.js";
 import { hasRecentEvents, verifyMarker } from "./core/verify.js";
 import { maskSecret, orExit } from "./ui/ui.js";
@@ -33,7 +34,10 @@ export interface ConnectOptions {
   searchUrl?: string;
   /** Override the ingest endpoint (split deployments hit Vector directly, e.g. :8080). */
   ingestUrl?: string;
-  /** Provide the ingest token (VECTOR_AUTH_TOKEN) directly instead of via .env/prompt. */
+  /**
+   * An ingest token to test with. On a nano that binds tokens to log sources: a token bound to
+   * one (optional). On an older nano: VECTOR_AUTH_TOKEN, otherwise read from .env or prompted.
+   */
   ingestToken?: string;
 }
 
@@ -101,21 +105,38 @@ export async function runConnect(opts: ConnectOptions): Promise<void> {
   const apiKey = await resolveApiKey(client, opts, profile.apiKey);
   client.setApiKey(apiKey);
 
-  // 4. Ingest token (separate from the API key)
-  const ingestToken =
-    opts.ingestToken ??
-    env?.ingestToken ??
-    profile.ingestToken ??
-    (await promptRequired(opts, "Paste your nano ingest token (VECTOR_AUTH_TOKEN)", {
-      isSecret: true,
-      hint: "Self-hosted: it's in your nano install's .env. SaaS: from your nano admin console.",
-    }));
-
-  saveInstance(baseUrl, { apiKey, ingestToken, searchUrl: opts.searchUrl });
-
-  // 5. Prove the full path works end-to-end with a synthetic event.
+  // 4. Which ingest contract does this nano speak? A current nano binds every ingest token to one
+  // log source (NAN-3806): there is no shared token to ask for, and `add-*` issues one per source.
+  const model = await detectIngestModel(client);
   const ingestEndpoints = ingestCandidates(baseUrl, opts.ingestUrl);
-  await runConnectivityCheck(client, baseUrl, ingestEndpoints, ingestToken, opts);
+  if (model.kind === "bound") {
+    saveInstance(baseUrl, { apiKey, searchUrl: opts.searchUrl });
+    log.info(
+      "This nano binds every ingest token to exactly one log source: the token alone decides where " +
+        `events land, and an unbound token is refused (401). No shared token needed — ${pc.cyan(
+          "add-* --transport http",
+        )} issues one token per source.`,
+    );
+    await runBoundIngestCheck(client, baseUrl, ingestEndpoints, model, opts);
+  } else {
+    // 4b. Older nano: one shared ingest token (separate from the API key), routed by X-Source-Type.
+    if (model.kind === "unknown") {
+      log.warn(`Couldn't tell whether this nano binds ingest tokens to log sources (${model.reason}).`);
+    }
+    const ingestToken =
+      opts.ingestToken ??
+      env?.ingestToken ??
+      profile.ingestToken ??
+      (await promptRequired(opts, "Paste your nano ingest token (VECTOR_AUTH_TOKEN)", {
+        isSecret: true,
+        hint: "Self-hosted: it's in your nano install's .env. SaaS: from your nano admin console.",
+      }));
+
+    saveInstance(baseUrl, { apiKey, ingestToken, searchUrl: opts.searchUrl });
+
+    // 5. Prove the full path works end-to-end with a synthetic event.
+    await runConnectivityCheck(client, baseUrl, ingestEndpoints, ingestToken, opts, TEST_SOURCE_TYPE, model.kind);
+  }
 
   note(
     [
@@ -213,10 +234,10 @@ async function loginAndMint(client: NanoClient): Promise<string> {
   }
 
   note(
-    [...REQUIRED_SCOPES, ...ELEVATED_SCOPES]
+    [...REQUIRED_SCOPES, ...ELEVATED_SCOPES, ...TOKEN_SCOPES]
       .map((scope) => `  ${pc.cyan(scope)} — ${SCOPE_DESCRIPTIONS[scope] ?? ""}`)
       .join("\n") + pc.dim(
-        `\n  (the last ${ELEVATED_SCOPES.length} are best-effort — skipped if your account can't grant them)`,
+        `\n  (the last ${ELEVATED_SCOPES.length + TOKEN_SCOPES.length} are best-effort — skipped if your account can't grant them)`,
       ),
     "I'll create an API key named 'nano-connect' with these permissions",
   );
@@ -226,36 +247,40 @@ async function loginAndMint(client: NanoClient): Promise<string> {
   }
 
   s.start("Creating API key");
-  // Try for the deploy-capable key; if the account can't grant those, fall back to read-only.
-  try {
-    const created = await client.createApiKey(accessToken, "nano-connect", [
-      ...REQUIRED_SCOPES,
-      ...ELEVATED_SCOPES,
-    ]);
-    s.stop(pc.green(`Created API key ${pc.dim(created.key_prefix + "…")}`));
-    log.info(`Stored key ${pc.dim(maskSecret(created.key))} in your local profile.`);
-    return created.key;
-  } catch (err) {
-    if (err instanceof NanoApiError && err.status === 403) {
-      try {
-        const created = await client.createApiKey(accessToken, "nano-connect", [...REQUIRED_SCOPES]);
-        s.stop(pc.green(`Created API key ${pc.dim(created.key_prefix + "…")}`));
-        log.info(
-          `Stored a read-only key ${pc.dim(maskSecret(created.key))} (your account can't grant parser-deploy permissions, so the CLI will point you to the platform for that).`,
-        );
-        return created.key;
-      } catch {
-        // fall through to the error below
-      }
-    }
-    s.stop(pc.red("Could not create API key"));
-    if (err instanceof NanoApiError && err.status === 403) {
-      log.error(
-        "Your account is missing one of the required permissions, so it can't grant them to a key. Ask an admin, or paste a key that already has them.",
+  // Ask for the most capable key first and step down when the account can't grant it: token
+  // issuing (admins only) → parser deploy → read-only.
+  const tiers: { scopes: string[]; note?: string }[] = [
+    { scopes: [...REQUIRED_SCOPES, ...ELEVATED_SCOPES, ...TOKEN_SCOPES] },
+    {
+      scopes: [...REQUIRED_SCOPES, ...ELEVATED_SCOPES],
+      note: "your account can't issue ingest tokens, so for --transport http pass tokens bound to your log sources with --source-token",
+    },
+    {
+      scopes: [...REQUIRED_SCOPES],
+      note: "your account can't grant parser-deploy or token permissions, so the CLI will point you to the platform for those",
+    },
+  ];
+  let lastErr: unknown;
+  for (const tier of tiers) {
+    try {
+      const created = await client.createApiKey(accessToken, "nano-connect", tier.scopes);
+      s.stop(pc.green(`Created API key ${pc.dim(created.key_prefix + "…")}`));
+      log.info(
+        `Stored key ${pc.dim(maskSecret(created.key))} in your local profile${tier.note ? ` (${tier.note})` : ""}.`,
       );
+      return created.key;
+    } catch (err) {
+      lastErr = err;
+      if (!(err instanceof NanoApiError && err.status === 403)) break;
     }
-    throw err;
   }
+  s.stop(pc.red("Could not create API key"));
+  if (lastErr instanceof NanoApiError && lastErr.status === 403) {
+    log.error(
+      "Your account is missing one of the required permissions, so it can't grant them to a key. Ask an admin, or paste a key that already has them.",
+    );
+  }
+  throw lastErr;
 }
 
 /** Send a synthetic event and confirm it becomes searchable — the end-to-end smoke test. */
@@ -265,6 +290,8 @@ async function runConnectivityCheck(
   ingestEndpoints: string[],
   ingestToken: string,
   opts: ConnectOptions,
+  sourceType: string = TEST_SOURCE_TYPE,
+  model: IngestModel["kind"] = "legacy",
 ): Promise<void> {
   if (!opts.nonInteractive) {
     const run = orExit(
@@ -280,7 +307,7 @@ async function runConnectivityCheck(
   s.start("Sending a test event");
   let marker: string;
   try {
-    const sent = await sendTestEvent(ingestEndpoints, ingestToken, TEST_SOURCE_TYPE);
+    const sent = await sendTestEvent(ingestEndpoints, ingestToken, sourceType, model);
     marker = sent.marker;
     // Remember which candidate won so `add-* --transport http` targets a proven URL.
     saveInstance(baseUrl, { ingestUrl: sent.endpoint });
@@ -296,7 +323,7 @@ async function runConnectivityCheck(
   // what this used to be — expires below that floor, so a healthy instance reported "accepted but
   // not searchable" on essentially every first run. Measured 12–35s on managed tenants.
   s.start("Checking whether it's already searchable");
-  const result = await verifyMarker(client, TEST_SOURCE_TYPE, marker, { timeoutMs: 45_000 });
+  const result = await verifyMarker(client, sourceType, marker, { timeoutMs: 45_000 });
   if (result.arrived) {
     s.stop(pc.green(`Searchable already (${result.count} match) — ingest + query both work`));
   } else {
@@ -314,7 +341,7 @@ async function runConnectivityCheck(
     } else if (others === false) {
       log.warn(
         `The endpoint accepted the event, but it never became searchable — and no events at all are arriving on this instance right now. That looks like the instance isn't delivering to storage, rather than anything wrong with your token or this collector. Check the nano deployment's health, then re-check with ${pc.cyan(
-          `connect verify --source ${TEST_SOURCE_TYPE}`,
+          `connect verify --source ${sourceType}`,
         )}. (On a brand-new instance with no other sources yet, this is also just what "no data" looks like.)`,
       );
     } else {
@@ -322,10 +349,54 @@ async function runConnectivityCheck(
         `The endpoint accepted the event, but it isn't searchable yet and I couldn't check whether other events are arriving. Two usual causes: a wrong ${pc.cyan(
           "VECTOR_AUTH_TOKEN",
         )} (nano returns 200 and drops it), or a slow flush. Re-check with ${pc.cyan(
-          `connect verify --source ${TEST_SOURCE_TYPE}`,
+          `connect verify --source ${sourceType}`,
         )}.`,
       );
     }
+  }
+}
+
+/**
+ * The ingest check against a nano that binds tokens to log sources. With a token (--ingest-token)
+ * it sends the marked test event, which lands in that token's source — so that is where it is
+ * looked for. Without one, it only locates the ingest endpoint (an unauthenticated POST is
+ * refused there, nothing is ingested) so `add-* --transport http` targets a proven URL.
+ */
+async function runBoundIngestCheck(
+  client: NanoClient,
+  baseUrl: string,
+  ingestEndpoints: string[],
+  model: Extract<IngestModel, { kind: "bound" }>,
+  opts: ConnectOptions,
+): Promise<void> {
+  const token = opts.ingestToken;
+  if (token) {
+    const cred = model.list.tokens.find((t) => t.token_prefix === token.slice(0, 12));
+    const route = cred ? (cred.state === "active" ? cred.route_key : undefined) : model.list.install_token?.state === "active"
+        ? model.list.install_token.route_key
+        : undefined;
+    if (!route) {
+      throw new NanoApiError(
+        cred?.state === "revoked"
+          ? `The --ingest-token "${cred.name}" is revoked.`
+          : ingestRejectionMessage(401, "bound"),
+      );
+    }
+    await runConnectivityCheck(client, baseUrl, ingestEndpoints, token, opts, route, "bound");
+    return;
+  }
+  const s = spinner();
+  s.start("Locating the ingest endpoint");
+  const endpoint = await probeIngestEndpoint(ingestEndpoints);
+  if (endpoint) {
+    saveInstance(baseUrl, { ingestUrl: endpoint });
+    s.stop(pc.green(`Ingest endpoint: ${endpoint} (it requires a source-bound token, as it should)`));
+  } else {
+    s.stop(pc.yellow("Couldn't locate the HTTP ingest endpoint"));
+    log.warn(
+      `None of ${ingestEndpoints.join(", ")} answered like nano's ingest endpoint. The native uplink ` +
+        `is unaffected; for --transport http pass ${pc.cyan("--ingest-url")}.`,
+    );
   }
 }
 

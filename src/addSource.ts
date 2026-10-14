@@ -4,7 +4,8 @@ import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
 import { resolveSavedConnection } from "./core/connection.js";
 import { selectSyslogSources } from "./selectSources.js";
-import { buildIngestEnvFile, MTLS_SECRET_FILES, mtlsArtifacts, resolveUplink } from "./core/uplink.js";
+import { buildIngestEnvFile, hasSourceTokens, MTLS_SECRET_FILES, mtlsArtifacts, resolveUplink } from "./core/uplink.js";
+import { attachSourceTokens } from "./sourceTokens.js";
 import { validateHost, validatePort } from "./core/target.js";
 import { preflightNativeUplink } from "./preflight.js";
 import {
@@ -35,6 +36,10 @@ export interface AddSourceOptions {
   ingestUrl?: string;
   /** Ingest token for --transport http (otherwise from the saved connection). */
   ingestToken?: string;
+  /** `st=token,...`: per-source ingest tokens you already have (--transport http). */
+  sourceToken?: string;
+  /** `st=<log source>,...`: which nano log source each source_type lands in (--transport http). */
+  sourceMap?: string;
   /** Comma-separated source_types to collect (lets non-interactive runs be precise). */
   sources?: string;
   /** Pull the image and start the collector here after generating. */
@@ -73,7 +78,7 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
   const nanoHost = opts.vectorHost ?? new URL(conn.baseUrl).hostname;
   const nanoPort = validatePort(Number(opts.vectorPort ?? DEFAULT_VECTOR_PORT), "--vector-port");
 
-  const uplink = resolveUplink({
+  const baseUplink = resolveUplink({
     baseUrl: conn.baseUrl,
     target: { host: nanoHost, port: nanoPort },
     opts,
@@ -81,6 +86,8 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
     ingestToken: opts.ingestToken ?? conn.ingestToken,
   });
 
+  let uplink = baseUplink;
+  const sourceTypes = selected.map((d) => d.sourceType);
   if (uplink.transport === "native") {
     log.info(
       `Transport: Vector-native + TLS → ${nanoHost}:${nanoPort}${
@@ -89,7 +96,17 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
     );
     await preflightNativeUplink(uplink, conn.baseUrl);
   } else {
-    log.info(`Transport: HTTPS → ${uplink.ingestUrl} (authenticated with your ingest token).`);
+    log.info(`Transport: HTTPS → ${uplink.ingestUrl} (one ingest token per log source).`);
+    // Tokens are bound to log sources, so a parser import (which creates the source) has to happen
+    // BEFORE the tokens are issued.
+    if (client) {
+      await reviewParsers(client, sourceTypes, {
+        deployParsers: opts.deployParsers,
+        nonInteractive: opts.nonInteractive,
+        ctx,
+      });
+    }
+    uplink = await attachSourceTokens(uplink, { baseUrl: conn.baseUrl, client, sourceTypes, opts });
   }
 
   const plan: SyslogPlan = {
@@ -112,9 +129,7 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
       "nano-collector.service": buildSystemdUnit(Boolean(uplink.tls.mtls)),
       "README.md": buildReadme(plan, generatedAt),
       // Keeps the ingest token out of vector.toml and out of the compose file.
-      ...(uplink.transport === "http" && uplink.ingestToken
-        ? { ".env": buildIngestEnvFile(uplink.ingestToken) }
-        : {}),
+      ...(hasSourceTokens(uplink) ? { ".env": buildIngestEnvFile(uplink.sourceTokens!) } : {}),
       ...mtlsArtifacts(uplink),
     },
     { secretFiles: [".env", ...MTLS_SECRET_FILES] },
@@ -137,8 +152,9 @@ export async function runAddSource(opts: AddSourceOptions): Promise<void> {
   }
 
   // Tell them which source_types nano already parses / offer to deploy a community parser.
-  if (client) {
-    await reviewParsers(client, selected.map((d) => d.sourceType), {
+  // (The HTTP path already did this, before issuing tokens.)
+  if (client && uplink.transport === "native") {
+    await reviewParsers(client, sourceTypes, {
       deployParsers: opts.deployParsers,
       nonInteractive: opts.nonInteractive,
       ctx,

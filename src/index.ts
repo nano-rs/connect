@@ -37,7 +37,7 @@ program
   .option("--env-file <path>", "path to a nano install .env to read connection details from")
   .option("--search-url <url>", "override the search endpoint (split deployments, e.g. http://host:3002/api/search)")
   .option("--ingest-url <url>", "override the ingest endpoint (split deployments, e.g. http://host:8080/)")
-  .option("--ingest-token <token>", "ingest token (VECTOR_AUTH_TOKEN); otherwise read from .env or prompted")
+  .option("--ingest-token <token>", "ingest token to test with: a token bound to a log source, or (older nano) VECTOR_AUTH_TOKEN")
   .option("--non-interactive", "fail instead of prompting when a required value is missing")
   .action(async (raw: Record<string, unknown>) => {
     const opts: ConnectOptions = {
@@ -64,10 +64,12 @@ program
   .option("--env-file <path>", "path to a nano install .env to read connection details from")
   .option("--vector-host <host>", "nano Vector-native host (defaults to the nano URL's host)")
   .option("--vector-port <port>", "nano Vector-native port (default 6000)")
-  .option("--transport <mode>", "how the collector reaches nano: native (Vector-native + TLS) | http (HTTPS + ingest token)", "native")
+  .option("--transport <mode>", "how the collector reaches nano: native (Vector-native + TLS) | http (HTTPS, one ingest token per log source)", "native")
   .option("--mtls-dir <dir>", "where to find the Vector mTLS bundle (default: the current directory — just drop ca.crt, client.crt, client.key in)")
   .option("--ingest-url <url>", "override the ingest endpoint used by --transport http")
-  .option("--ingest-token <token>", "ingest token for --transport http (defaults to your saved connection)")
+  .option("--ingest-token <token>", "shared ingest token for --transport http against a nano without per-source tokens (defaults to your saved connection)")
+  .option("--source-token <pairs>", "with --transport http: ingest tokens you already have, one per source_type (e.g. cisco_asa=nit_…,palo_alto=nit_…); an unbound one is bound for you")
+  .option("--source-map <pairs>", "with --transport http: which nano log source each source_type lands in, by name, route key or id (e.g. cisco_asa=\"Cisco ASA\")")
   .option("--sources <ids>", "comma-separated source_types to collect, `:tcp`/`:udp` to pin transport — see `connect list-sources` (e.g. cisco_asa,routeros:tcp)")
   .addOption(new Option("--devices <ids>", "deprecated alias for --sources").hideHelp())
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/syslog)")
@@ -85,6 +87,8 @@ program
       mtlsDir: raw.mtlsDir as string | undefined,
       ingestUrl: raw.ingestUrl as string | undefined,
       ingestToken: raw.ingestToken as string | undefined,
+      sourceToken: raw.sourceToken as string | undefined,
+      sourceMap: raw.sourceMap as string | undefined,
       sources: (raw.sources ?? raw.devices) as string | undefined,
       outDir: raw.outDir as string | undefined,
       run: Boolean(raw.run),
@@ -107,10 +111,12 @@ program
   .option("--os <os>", "endpoint OS: windows | linux")
   .option("--target <host:port>", "where the agent ships (an aggregator), default port 9000")
   .option("--to-nano", "ship straight to nano (:6000) instead of an aggregator")
-  .option("--transport <mode>", "how the agent reaches nano when using --to-nano: native (Vector-native + TLS) | http (HTTPS + ingest token)", "native")
+  .option("--transport <mode>", "how the agent reaches nano when using --to-nano: native (Vector-native + TLS) | http (HTTPS, one ingest token per log source)", "native")
   .option("--mtls-dir <dir>", "where to find the Vector mTLS bundle (default: the current directory — just drop ca.crt, client.crt, client.key in)")
   .option("--ingest-url <url>", "override the ingest endpoint used by --transport http")
-  .option("--ingest-token <token>", "ingest token for --transport http (defaults to your saved connection)")
+  .option("--ingest-token <token>", "shared ingest token for --transport http against a nano without per-source tokens (defaults to your saved connection)")
+  .option("--source-token <pairs>", "with --transport http: ingest tokens you already have, one per source_type (e.g. cisco_asa=nit_…,palo_alto=nit_…); an unbound one is bound for you")
+  .option("--source-map <pairs>", "with --transport http: which nano log source each source_type lands in, by name, route key or id (e.g. cisco_asa=\"Cisco ASA\")")
 
   .option("--no-journald", "(linux) don't collect journald")
   .option("--out-dir <dir>", "where to write the generated config (default ./onboarding/agent-<os>)")
@@ -128,6 +134,8 @@ program
       mtlsDir: raw.mtlsDir as string | undefined,
       ingestUrl: raw.ingestUrl as string | undefined,
       ingestToken: raw.ingestToken as string | undefined,
+      sourceToken: raw.sourceToken as string | undefined,
+      sourceMap: raw.sourceMap as string | undefined,
       journald: raw.journald as boolean | undefined,
       outDir: raw.outDir as string | undefined,
       deployParsers: Boolean(raw.deployParsers),
@@ -149,10 +157,12 @@ program
   .option("--vector-host <host>", "nano Vector-native host (defaults to the nano URL's host)")
   .option("--vector-port <port>", "nano Vector-native port (default 6000)")
   .option("--agent-port <port>", "port endpoint agents ship to (default 9000)")
-  .option("--transport <mode>", "how the aggregator reaches nano: native (Vector-native + TLS) | http (HTTPS + ingest token)", "native")
+  .option("--transport <mode>", "how the aggregator reaches nano: native (Vector-native + TLS) | http (HTTPS, one ingest token per log source)", "native")
   .option("--mtls-dir <dir>", "where to find the Vector mTLS bundle (default: the current directory — just drop ca.crt, client.crt, client.key in)")
   .option("--ingest-url <url>", "override the ingest endpoint used by --transport http")
-  .option("--ingest-token <token>", "ingest token for --transport http (defaults to your saved connection)")
+  .option("--ingest-token <token>", "shared ingest token for --transport http against a nano without per-source tokens (defaults to your saved connection)")
+  .option("--source-token <pairs>", "with --transport http: ingest tokens you already have, one per source_type (e.g. cisco_asa=nit_…,palo_alto=nit_…); an unbound one is bound for you")
+  .option("--source-map <pairs>", "with --transport http: which nano log source each source_type lands in, by name, route key or id (e.g. cisco_asa=\"Cisco ASA\")")
 
   .option("--sources <ids>", "comma-separated syslog source_types to also listen for, `:tcp`/`:udp` to pin transport — see `connect list-sources`")
   .addOption(new Option("--devices <ids>", "deprecated alias for --sources").hideHelp())
@@ -172,6 +182,8 @@ program
       mtlsDir: raw.mtlsDir as string | undefined,
       ingestUrl: raw.ingestUrl as string | undefined,
       ingestToken: raw.ingestToken as string | undefined,
+      sourceToken: raw.sourceToken as string | undefined,
+      sourceMap: raw.sourceMap as string | undefined,
       sources: (raw.sources ?? raw.devices) as string | undefined,
       outDir: raw.outDir as string | undefined,
       run: Boolean(raw.run),

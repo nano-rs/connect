@@ -12,14 +12,22 @@ import {
 import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
 import { resolveSavedConnection } from "./core/connection.js";
-import { buildIngestEnvFile, MTLS_SECRET_FILES, mtlsArtifacts, type NanoUplink, resolveUplink } from "./core/uplink.js";
+import {
+  buildIngestEnvFile,
+  hasSourceTokens,
+  MTLS_SECRET_FILES,
+  mtlsArtifacts,
+  type NanoUplink,
+  resolveUplink,
+} from "./core/uplink.js";
+import { attachSourceTokens } from "./sourceTokens.js";
 import { ID_RE, parseHostPort } from "./core/target.js";
 import { NanoApiError } from "./core/types.js";
 import { DEFAULT_IMAGE, type Target } from "./core/vector.js";
 
 /** Short transport description for the generated READMEs. */
 function transportDoc(uplink: NanoUplink): string {
-  if (uplink.transport === "http") return "HTTPS + ingest token";
+  if (uplink.transport === "http") return "HTTPS, one ingest token per log source";
   return uplink.tls.enabled
     ? `Vector-native, TLS${uplink.tls.mtls ? " + client certificate" : ""}`
     : "Vector-native, on your network";
@@ -44,6 +52,10 @@ export interface AddAgentOptions {
   mtlsDir?: string;
   ingestUrl?: string;
   ingestToken?: string;
+  /** `st=token,...`: per-source ingest tokens you already have (--to-nano --transport http). */
+  sourceToken?: string;
+  /** `st=<log source>,...`: which nano log source each source_type lands in. */
+  sourceMap?: string;
   /** Auto-deploy available community parsers without prompting. */
   deployParsers?: boolean;
   nonInteractive?: boolean;
@@ -77,7 +89,7 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
   }
 
   // Where it ships (aggregator by default; nano directly if asked).
-  const uplink = await resolveAgentUplink(conn, opts);
+  let uplink = await resolveAgentUplink(conn, opts);
   if (uplink.transport === "native") {
     log.info(
       uplink.tls.enabled
@@ -88,17 +100,34 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
     );
     await preflightNativeUplink(uplink, conn.baseUrl);
   } else {
-    log.info(`Transport: HTTPS → ${uplink.ingestUrl} (authenticated with your ingest token).`);
+    log.info(`Transport: HTTPS → ${uplink.ingestUrl} (one ingest token per log source).`);
   }
+
+  const client = conn.apiKey ? new NanoClient(conn.baseUrl, { apiKey: conn.apiKey }) : undefined;
+  /**
+   * HTTP straight to nano: review parsers FIRST (an import creates the log source a token is
+   * bound to), then give each source_type its own bound token.
+   */
+  const attachTokens = async (types: string[]): Promise<void> => {
+    if (uplink.transport !== "http") return;
+    if (client) {
+      await reviewParsers(client, types, { deployParsers: opts.deployParsers, nonInteractive: opts.nonInteractive });
+    }
+    uplink = await attachSourceTokens(uplink, { baseUrl: conn.baseUrl, client, sourceTypes: types, opts });
+  };
+  const envArtifact = (): Record<string, string> =>
+    hasSourceTokens(uplink) ? { ".env": buildIngestEnvFile(uplink.sourceTokens!) } : {};
 
   const generatedAt = new Date().toISOString();
   const dir = opts.outDir ?? `./onboarding/agent-${os}`;
   const s = spinner();
-  s.start("Generating agent config");
 
   let paths: string[];
   let sourceTypes: string[] = [];
   if (os === "windows") {
+    sourceTypes = ["windows_event", "windows_sysmon"];
+    await attachTokens(sourceTypes);
+    s.start("Generating agent config");
     paths = writeArtifacts(
       dir,
       {
@@ -108,14 +137,11 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
         ),
         "install-agent.ps1": buildWindowsInstaller(),
         "README.md": windowsReadme(uplink, generatedAt),
-        ...(uplink.transport === "http" && uplink.ingestToken
-          ? { ".env": buildIngestEnvFile(uplink.ingestToken) }
-          : {}),
+        ...envArtifact(),
         ...mtlsArtifacts(uplink),
       },
       { secretFiles: [".env", ...MTLS_SECRET_FILES] },
     );
-    sourceTypes = ["windows_event", "windows_sysmon"];
     s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
     note(
       [
@@ -131,23 +157,23 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
     if (!journald && files.length === 0) {
       throw new NanoApiError("Nothing to collect: enable journald or add a file group.");
     }
+    sourceTypes = [
+      ...(journald ? ["linux_journald", "linux_sysmon"] : []),
+      ...files.map((f) => f.sourceType),
+    ];
+    await attachTokens(sourceTypes);
+    s.start("Generating agent config");
     paths = writeArtifacts(
       dir,
       {
         "vector.toml": buildLinuxAgentToml({ uplink, journald, files, bufferBytes: BUFFER_BYTES, image: DEFAULT_IMAGE }, generatedAt),
         "nano-agent.service": buildLinuxAgentSystemd(Boolean(uplink.tls.mtls)),
         "README.md": linuxReadme(uplink, journald, files, generatedAt),
-        ...(uplink.transport === "http" && uplink.ingestToken
-          ? { ".env": buildIngestEnvFile(uplink.ingestToken) }
-          : {}),
+        ...envArtifact(),
         ...mtlsArtifacts(uplink),
       },
       { secretFiles: [".env", ...MTLS_SECRET_FILES] },
     );
-    sourceTypes = [
-      ...(journald ? ["linux_journald", "linux_sysmon"] : []),
-      ...files.map((f) => f.sourceType),
-    ];
     s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
     note(
       [
@@ -159,8 +185,8 @@ export async function runAddAgent(opts: AddAgentOptions): Promise<void> {
     );
   }
 
-  if (conn.apiKey) {
-    const client = new NanoClient(conn.baseUrl, { apiKey: conn.apiKey });
+  // (The HTTP path reviewed parsers before issuing tokens.)
+  if (client && uplink.transport === "native") {
     await reviewParsers(client, sourceTypes, {
       deployParsers: opts.deployParsers,
       nonInteractive: opts.nonInteractive,

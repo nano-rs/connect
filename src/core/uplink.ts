@@ -3,7 +3,8 @@ import { X509Certificate } from "node:crypto";
 import { basename, join, resolve } from "node:path";
 import { ingestCandidates } from "./endpoints.js";
 import { NanoApiError } from "./types.js";
-import { INGEST_TOKEN_ENV, type MtlsPaths, type SinkTls, type Target, type Transport } from "./vector.js";
+import { assertTokenShape, tokenEnvVar } from "./ingestTokens.js";
+import { type MtlsPaths, type SinkTls, type Target, type Transport } from "./vector.js";
 
 /**
  * How a generated collector reaches nano.
@@ -23,8 +24,19 @@ export interface NanoUplink {
   ingestUrl: string;
   /** native only. */
   tls: SinkTls;
-  /** http only — written to a 0600 .env beside the config, never inlined into vector.toml. */
+  /**
+   * http only — the shared token from the saved connection / --ingest-token. Used as every
+   * source's token only against a nano that predates per-source tokens (NAN-3806).
+   */
   ingestToken?: string;
+  /**
+   * http only — one token per source_type, each bound to that type's nano log source. Written to
+   * a 0600 .env beside the config as NANO_TOKEN_<SOURCE_TYPE>, never inlined into vector.toml.
+   * Filled by `attachSourceTokens` once the source_types are known.
+   */
+  sourceTokens?: Record<string, string>;
+  /** http only — source_types left without a token (their sink ships commented out), and why. */
+  skipped?: Record<string, string>;
   /**
    * Where the operator's cert files live right now, so the generator can COPY them into the
    * artifact directory. We never reference the source location from the config: the realistic
@@ -176,13 +188,6 @@ export function resolveUplink(args: ResolveUplinkArgs): NanoUplink {
     ingestCandidates(args.baseUrl)[0] ??
     `${args.baseUrl}/ingest/`;
 
-  if (transport === "http" && !args.ingestToken) {
-    throw new NanoApiError(
-      `--transport http needs the ingest token (${INGEST_TOKEN_ENV}) to authenticate. Run \`connect\` ` +
-        `first so it's saved, or pass --ingest-token.`,
-    );
-  }
-
   return {
     transport,
     target: args.target,
@@ -195,17 +200,33 @@ export function resolveUplink(args: ResolveUplinkArgs): NanoUplink {
   };
 }
 
-/** The `.env` written beside an HTTP-transport config so the token stays out of vector.toml. */
-export function buildIngestEnvFile(token: string): string {
-  return `# Ingest token for nano — read by vector.toml as \${${INGEST_TOKEN_ENV}}.
+/**
+ * The `.env` written beside an HTTP-transport config so tokens stay out of vector.toml: one
+ * `NANO_TOKEN_<SOURCE_TYPE>` per sink, each bound to that source_type's nano log source.
+ */
+export function buildIngestEnvFile(tokens: Record<string, string>): string {
+  const lines = Object.entries(tokens)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([sourceType, token]) => {
+      assertTokenShape(token, sourceType);
+      return `${tokenEnvVar(sourceType)}=${token}`;
+    });
+  return `# Ingest tokens for nano, one per log source — read by vector.toml as \${NANO_TOKEN_<SOURCE_TYPE>}.
+# nano lands every event in the log source its token is bound to, so never swap them between sinks.
 # Keep this file 0600 and out of version control.
-${INGEST_TOKEN_ENV}=${token}
+${lines.join("\n")}
 `;
+}
+
+/** True when an HTTP uplink has at least one token to write. */
+export function hasSourceTokens(uplink: NanoUplink): boolean {
+  return uplink.transport === "http" && Object.keys(uplink.sourceTokens ?? {}).length > 0;
 }
 
 /** Extra docker-compose service lines an uplink needs (env file, cert mount). */
 export function composeUplinkLines(uplink: NanoUplink): { env: string; volumes: string } {
-  const env = uplink.transport === "http" ? "    env_file:\n      - ./.env\n" : "";
+  // Only when a .env is written: compose refuses a missing env_file.
+  const env = hasSourceTokens(uplink) ? "    env_file:\n      - ./.env\n" : "";
   // Mounts the copied bundle, never the operator's download folder.
   const volumes = uplink.tls.mtls ? `      - ./tls:${MTLS_CONFIG_DIR}:ro\n` : "";
   return { env, volumes };
