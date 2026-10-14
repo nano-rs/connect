@@ -12,7 +12,8 @@ import { NanoClient } from "./core/api.js";
 import { writeArtifacts } from "./core/artifacts.js";
 import { resolveSavedConnection } from "./core/connection.js";
 import { selectSyslogSources } from "./selectSources.js";
-import { buildIngestEnvFile, MTLS_SECRET_FILES, mtlsArtifacts, resolveUplink } from "./core/uplink.js";
+import { buildIngestEnvFile, hasSourceTokens, MTLS_SECRET_FILES, mtlsArtifacts, resolveUplink } from "./core/uplink.js";
+import { attachSourceTokens } from "./sourceTokens.js";
 import { validateHost, validatePort } from "./core/target.js";
 import { preflightNativeUplink } from "./preflight.js";
 import { DEFAULT_IMAGE } from "./core/vector.js";
@@ -33,6 +34,10 @@ export interface AddAggregatorOptions {
   mtlsDir?: string;
   ingestUrl?: string;
   ingestToken?: string;
+  /** `st=token,...`: per-source ingest tokens you already have (--transport http). */
+  sourceToken?: string;
+  /** `st=<log source>,...`: which nano log source each source_type lands in (--transport http). */
+  sourceMap?: string;
   /** Pull the image and start the aggregator here after generating. */
   run?: boolean;
   /** Auto-deploy available community parsers without prompting. */
@@ -70,7 +75,7 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
   const nanoPort = validatePort(Number(opts.vectorPort ?? DEFAULT_NANO_PORT), "--vector-port");
   const agentPort = validatePort(Number(opts.agentPort ?? DEFAULT_AGENT_PORT), "--agent-port");
 
-  const uplink = resolveUplink({
+  let uplink = resolveUplink({
     baseUrl: conn.baseUrl,
     target: { host: nanoHost, port: nanoPort },
     opts,
@@ -86,12 +91,28 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
     );
     await preflightNativeUplink(uplink, conn.baseUrl);
   } else {
-    log.info(`Transport: HTTPS → ${uplink.ingestUrl} (authenticated with your ingest token).`);
+    log.info(`Transport: HTTPS → ${uplink.ingestUrl} (one ingest token per log source).`);
     log.warn(
-      `HTTP transport fans out per source_type. Agent types beyond ${pc.dim(
+      `HTTP transport fans out per source_type, one token each. Agent types beyond ${pc.dim(
         AGENT_SOURCE_TYPES.join(", "),
-      )} are DROPPED unless you add a route + sink for them in vector.toml.`,
+      )} are DROPPED unless you add a route + sink + token for them in vector.toml.`,
     );
+    // Parser imports create the log sources tokens are bound to, so they come first.
+    if (client && syslogSelected.length > 0) {
+      await reviewParsers(client, syslogSelected.map((d) => d.sourceType), {
+        deployParsers: opts.deployParsers,
+        nonInteractive: opts.nonInteractive,
+        ctx,
+      });
+    }
+    uplink = await attachSourceTokens(uplink, {
+      baseUrl: conn.baseUrl,
+      client,
+      sourceTypes: [...AGENT_SOURCE_TYPES, ...syslogSelected.map((d) => d.sourceType)],
+      // Which agent types will actually ship here isn't known yet: skip, don't fail, on those.
+      optional: [...AGENT_SOURCE_TYPES],
+      opts,
+    });
   }
 
   const plan: AggregatorPlan = {
@@ -113,16 +134,14 @@ export async function runAddAggregator(opts: AddAggregatorOptions): Promise<void
       "vector.toml": buildAggregatorToml(plan, generatedAt),
       "docker-compose.yml": buildAggregatorCompose(plan),
       "README.md": buildAggregatorReadme(plan, generatedAt),
-      ...(uplink.transport === "http" && uplink.ingestToken
-        ? { ".env": buildIngestEnvFile(uplink.ingestToken) }
-        : {}),
+      ...(hasSourceTokens(uplink) ? { ".env": buildIngestEnvFile(uplink.sourceTokens!) } : {}),
       ...mtlsArtifacts(uplink),
     },
     { secretFiles: [".env", ...MTLS_SECRET_FILES] },
   );
   s.stop(pc.green(`Wrote ${paths.length} files to ${dir}`));
 
-  if (client && syslogSelected.length > 0) {
+  if (client && syslogSelected.length > 0 && uplink.transport === "native") {
     await reviewParsers(client, syslogSelected.map((d) => d.sourceType), {
       deployParsers: opts.deployParsers,
       nonInteractive: opts.nonInteractive,

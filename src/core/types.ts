@@ -4,7 +4,10 @@ export interface Connection {
   baseUrl: string;
   /** API key used for authenticated API calls (search, log-source lookup). */
   apiKey?: string;
-  /** Vector ingest token (Authorization: Bearer ...) for POSTing logs. Separate from apiKey. */
+  /**
+   * Shared ingest token (the install's VECTOR_AUTH_TOKEN). Only a nano that predates per-source
+   * tokens (NAN-3806) routes with it; a current nano binds each token to one log source.
+   */
   ingestToken?: string;
   /** Where this connection's values came from, for honest UX. */
   source: "flag" | "profile" | "env-file" | "prompt";
@@ -101,6 +104,58 @@ export interface RepositoryParser {
 export interface DeploymentResult {
   success: boolean;
   message?: string;
+}
+
+/**
+ * A log source an ingest token can be bound to (nano NAN-3806, `GET /api/ingest-tokens` →
+ * `sources`). Only push-capable sources are listed (HTTP, HEC, Vector); never OTLP or pulled ones.
+ */
+export interface BindableSource {
+  source_id: string;
+  name: string;
+  /** The source's transport label (`routed`, `splunk_hec`, ...). */
+  source_type: string;
+  /** The `.source_type` every event sent with a token bound to this source is routed on. */
+  route_key: string;
+  enabled: boolean;
+}
+
+/** One issued ingest token as nano lists it. Never carries the token value. */
+export interface IngestTokenInfo {
+  credential_id: string;
+  name: string;
+  /** `nit_` plus the first 8 random characters — the first 12 characters of the token value. */
+  token_prefix: string;
+  /** `active`, `unbound` (refused with 401 until bound) or `revoked`. */
+  state: string;
+  source_id?: string | null;
+  source_name?: string | null;
+  route_key?: string | null;
+}
+
+/** The install-wide token's state (`VECTOR_AUTH_TOKEN`). Its value is never returned. */
+export interface InstallTokenState {
+  enabled: boolean;
+  /** `active` (enabled and bound), `unbound`, `disabled` or `not_configured`. */
+  state?: string;
+  source_id?: string | null;
+  route_key?: string | null;
+}
+
+/**
+ * `GET /api/ingest-tokens`. `sources` is what marks a nano that binds every token to one source
+ * (NAN-3806); a nano that predates it returns the list without `sources`.
+ */
+export interface IngestTokenList {
+  tokens: IngestTokenInfo[];
+  install_token?: InstallTokenState;
+  sources?: BindableSource[];
+}
+
+/** `POST /api/ingest-tokens` (201). `token` is shown exactly once. */
+export interface IssuedIngestToken {
+  credential: IngestTokenInfo;
+  token: string;
 }
 
 /** A nano API error surfaced to the user. */

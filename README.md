@@ -16,7 +16,7 @@ npx @nano-rs/connect
 
 | Command | What it does |
 | --- | --- |
-| `connect` | Connect + authenticate to your instance, then send a test event to prove ingestion works. |
+| `connect` | Connect + authenticate to your instance, then prove ingestion works (a test event, or — on a nano with per-source tokens — locating the ingest endpoint). |
 | `connect add-source` | Generate a **syslog** collector — one listener port per source_type (Cisco ASA, PAN-OS, FortiGate, …). |
 | `connect add-agent --os windows\|linux` | Generate an **endpoint agent** — Windows Event Log + Sysmon, or Linux journald + Sysmon-for-Linux + files. |
 | `connect add-aggregator` | Generate an **aggregator** that fans endpoint agents (and syslog) into nano. |
@@ -102,16 +102,47 @@ detection and dashboards. Build one in the platform's Parser Editor, with the
 
 ## Auth
 
-Two separate secrets, by design in nano:
+Two kinds of secret, by design in nano:
 
 | Secret | Used for | Where it comes from |
 | --- | --- | --- |
-| **API key** | the nano API (verify search, parser matching/deploy) | minted by `connect` (with the exact scopes shown first), or paste your own |
-| **Ingest token** (`VECTOR_AUTH_TOKEN`) | authenticating logs sent to nano over `--transport http` | self-hosted `.env`; managed: app.nano.rs → your deployment → Credentials |
+| **API key** | the nano API (verify search, parser matching/deploy, issuing ingest tokens) | minted by `connect` (with the exact scopes shown first), or paste your own |
+| **Ingest tokens** | authenticating logs sent to nano over `--transport http` — **one per log source** | issued by `connect` for each source you collect (admin key), or yours via `--source-token` |
 
-There is no `logs:ingest` API-key scope — ingestion is gated by the Vector token, not the API. The
-token is never retrievable through the nano API, so `connect` can only get it from `--ingest-token`,
-a discovered `.env`, your saved profile, or an interactive paste.
+There is no `logs:ingest` API-key scope — ingestion is gated by ingest tokens, not the API key.
+
+### One ingest token per log source
+
+nano binds every ingest token to exactly **one log source**, and the token alone decides where an
+event lands: a `source_type` / `X-Source-Type` the sender claims never reroutes it (nano keeps a
+differing claim as `claimed_source_type`). A token that isn't bound to a source is refused with
+**401**, and there is no shared "send anything" token.
+
+So with `--transport http`, `connect` gives every source type its own sink and its own token:
+
+1. It reads the log sources a token can be bound to (`GET /api/ingest-tokens`).
+2. For each device / feed it asks which log source it should land in, preselecting the one whose
+   route key is that source_type (`--source-map cisco_asa="Cisco ASA"` answers it up front;
+   non-interactive runs use the route-key match).
+3. It reuses the token it issued earlier for that source, binds a token you passed with
+   `--source-token <source_type>=<token>` if it is still unbound
+   (`POST /api/ingest-tokens/{credential_id}/bind`), or issues a new bound one
+   (`POST /api/ingest-tokens`).
+4. Each token goes into the `.env` beside the config as `NANO_TOKEN_<SOURCE_TYPE>`.
+
+Issuing and binding tokens needs `settings:system` (an admin's key). Without it, issue tokens in
+**Ingestion → Credentials** and pass them with `--source-token`. A source type with no log source
+yet (no parser imported) ships with its sink commented out; deploy its parser
+(`--deploy-parsers`) and re-run. If a collector logs **401**, its token isn't bound to a log
+source: bind it in **Ingestion → Credentials → Bind**, or re-run `connect` to issue a bound one.
+
+**Older nano.** A nano that predates per-source tokens (its `GET /api/ingest-tokens` lists no
+`sources`, or doesn't exist) still routes on `X-Source-Type` with one shared install token
+(`VECTOR_AUTH_TOKEN`: self-hosted `.env`; managed: app.nano.rs → your deployment → Credentials).
+`connect` detects that and fills every `NANO_TOKEN_*` with the shared token, so the generated
+config has the same shape either way. After upgrading nano, re-run the command to get bound
+tokens. On such an instance the token can't be validated through the API, so `connect` takes it
+from `--ingest-token`, a discovered `.env`, your saved profile, or an interactive paste.
 
 Deploying a community parser (`--deploy-parsers`) is a composite operation and needs a key that can
 **create** a log source, **publish** the routing config, and **deploy** it. Syncing the catalog
@@ -132,9 +163,9 @@ in what protects the data.
 | --- | --- | --- |
 | Wire | Vector-to-Vector protobuf on `:6000` | NDJSON to `/ingest/` |
 | Encryption | **TLS, always** | HTTPS |
-| Authentication | none — the port accepts any client that can reach it | **ingest token** (bearer) |
+| Authentication | none — the port accepts any client that can reach it | **ingest token per log source** (bearer) |
 | Delivery | acks + backpressure + disk buffer | disk buffer |
-| Sinks | one for everything | **one per `source_type`** (see below) |
+| Sinks | one for everything | **one per `source_type`**, each with its own token (see below) |
 
 **Native is always TLS.** nano's managed listeners terminate TLS on `:6000`, so a plaintext sink
 fails the handshake (`connection error: broken pipe`) and silently buffers to disk forever. There
@@ -142,16 +173,18 @@ is no flag to turn it off.
 
 **Native is not authenticated.** TLS protects the data in transit, but anything that can reach the
 port can also write to it. Use it on a trusted network or VPN — or use `--transport http`, which
-authenticates every request with your ingest token.
+authenticates every request with the token bound to that source.
 
-**HTTP fans out per source_type.** nano routes on the `X-Source-Type` *request header*, not on any
-`source_type` field in the body, and Vector's http sink headers are static per sink. So each
-device type gets its own `[sinks.nano_<source_type>]` block. Add a device → add a sink. On the
-aggregator, agent source types outside the known set land in `agent_route._unmatched` and are
-**dropped** rather than mislabeled (Vector reports this as a config warning, by design).
+**HTTP fans out per source_type.** nano lands every event in the log source its token is bound
+to, and Vector's http sink credentials are static per sink. So each device type gets its own
+`[sinks.nano_<source_type>]` block with its own token (`${NANO_TOKEN_<SOURCE_TYPE>}`). Add a device →
+re-run `connect` (it adds the sink and issues the token). The sink still sends `X-Source-Type`:
+informational on a current nano, the routing key on an older one. On the aggregator, agent source
+types outside the known set land in `agent_route._unmatched` and are **dropped** rather than sent
+with another type's token (Vector reports this as a config warning, by design).
 
-With `--transport http`, the ingest token is written to a `.env` (mode 0600) beside the config and
-read as `${VECTOR_AUTH_TOKEN}` — never inlined into `vector.toml`.
+The tokens are written to a `.env` (mode 0600) beside the config and read as
+`${NANO_TOKEN_<SOURCE_TYPE>}` — never inlined into `vector.toml`.
 
 ### mTLS (client certificates)
 
@@ -253,7 +286,12 @@ works against the built-ins and says so.
 - `--target host:port` / `--to-nano` (add-agent) — where an agent ships
 - `--transport native|http` — how the collector reaches nano (see [Transports](#transports))
 - `--mtls-dir <dir>` — where to find the mTLS bundle (default: the directory you're running in)
-- `--ingest-url <url>` / `--ingest-token <token>` — override what `--transport http` uses
+- `--ingest-url <url>` — override the ingest endpoint `--transport http` uses
+- `--source-token a=<token>,b=<token>` — ingest tokens you already have, one per source_type (an
+  unbound one is bound for you)
+- `--source-map a=<log source>,…` — which nano log source each source_type lands in (name, route
+  key or id)
+- `--ingest-token <token>` — the shared install token, for a nano that predates per-source tokens
 
 ## Development
 

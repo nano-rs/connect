@@ -1,5 +1,7 @@
 /** Shared Vector config primitives reused across collector/agent/aggregator generators. */
 
+import { tokenEnvVar } from "./ingestTokens.js";
+
 /** Pinned stable Vector (0.55.0 first shipped windows_event_log in stable; 0.56.0 is current). */
 export const VECTOR_VERSION = "0.56.0";
 export const DEFAULT_IMAGE = `timberio/vector:${VECTOR_VERSION}-alpine`;
@@ -102,21 +104,27 @@ when_full = "block"`;
 export interface HttpSinkSpec {
   sourceType: string;
   inputs: string[];
+  /**
+   * Why this sink ships commented out (no log source / token for it yet). Its events are dropped
+   * at the route rather than sent with a token that would land them in the wrong source.
+   */
+  skipped?: string;
 }
 
-/** Env var the generated configs read the ingest token from (never inlined into vector.toml). */
+/**
+ * The shared install token's env var. Only an older nano (before per-source tokens, NAN-3806)
+ * routes with it; generated configs read one `NANO_TOKEN_<SOURCE_TYPE>` per sink instead.
+ */
 export const INGEST_TOKEN_ENV = "VECTOR_AUTH_TOKEN";
 
 /**
  * HTTP sinks for nano's `/ingest/` endpoint — one per source_type, deliberately.
  *
- * nano's managed ingest reads the routing key from the `X-Source-Type` REQUEST HEADER only; a
- * `source_type` field in the event body is ignored and the event lands as `unknown` (verified
- * against a live tenant). Vector's http sink headers are per-sink and static, so one shared sink
- * cannot carry per-event source types — hence the fan-out.
- *
- * Unlike the native uplink, this path IS authenticated: the ingest token goes out as a bearer
- * token, read from ${INGEST_TOKEN_ENV} at load time so it never lands in the config file.
+ * nano decides where an event lands from the sink's TOKEN: every ingest token is bound to exactly
+ * one log source (NAN-3806), so each source_type gets its own sink authenticating with its own
+ * token, read from `${NANO_TOKEN_<SOURCE_TYPE>}` at load time so it never lands in the config.
+ * The `X-Source-Type` header is still sent: a current nano ignores it for routing (it keeps a
+ * differing value as `claimed_source_type`), and an older nano routes on it.
  */
 export function httpSinks(specs: HttpSinkSpec[], ingestUrl: string, bufferBytes: number): string {
   const maxSize = Math.max(bufferBytes, MIN_DISK_BUFFER_BYTES);
@@ -124,7 +132,7 @@ export function httpSinks(specs: HttpSinkSpec[], ingestUrl: string, bufferBytes:
     .map((s) => {
       const name = `nano_${s.sourceType}`;
       const inputs = s.inputs.map((i) => `"${i}"`).join(", ");
-      return `[sinks.${name}]
+      const block = `[sinks.${name}]
 type = "http"
 inputs = [${inputs}]
 uri = "${ingestUrl}"
@@ -133,19 +141,22 @@ method = "post"
 # codec = "text" sends the .message field as a raw line — NOT "json", which would send the whole
 # Vector event as a JSON object. nano's HTTP ingest decodes the request body as bytes, so whatever
 # is on the wire becomes .message verbatim; a JSON envelope therefore lands as .message and every
-# parser that regexes a raw log line fails. One line per event, source_type via the header below.
+# parser that regexes a raw log line fails. One line per event.
 [sinks.${name}.encoding]
 codec = "text"
 
 [sinks.${name}.framing]
 method = "newline_delimited"
 
+# This token is bound to the nano log source for ${s.sourceType}: it alone decides where these
+# events land. One token per sink — never reuse it for another source_type.
 [sinks.${name}.auth]
 strategy = "bearer"
-token = "\${${INGEST_TOKEN_ENV}}"
+token = "\${${tokenEnvVar(s.sourceType)}}"
 
-# nano routes on X-Source-Type — NOT on any source_type field in the body. Content-Type must say
-# text/plain so nano treats the body as a raw log line rather than trying to unwrap it as JSON.
+# X-Source-Type is informational on a current nano (the token decides; a differing value is kept
+# as claimed_source_type) and the routing key on an older one. Content-Type must say text/plain
+# so nano treats the body as a raw log line rather than trying to unwrap it as JSON.
 [sinks.${name}.request.headers]
 X-Source-Type = "${s.sourceType}"
 Content-Type = "text/plain"
@@ -154,6 +165,11 @@ Content-Type = "text/plain"
 type = "disk"
 max_size = ${maxSize}
 when_full = "block"`;
+      if (!s.skipped) return block;
+      return `# --- ${s.sourceType}: not forwarded yet — ${s.skipped}
+# Re-run connect once it has a log source (or set ${tokenEnvVar(s.sourceType)} in .env to a token
+# bound to it), then uncomment this sink.
+${commentOut(block)}`;
     })
     .join("\n\n");
 }

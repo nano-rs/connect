@@ -3,6 +3,9 @@ import {
   type ApiKeyCreated,
   type AuthResponse,
   type DeploymentResult,
+  type IngestTokenInfo,
+  type IngestTokenList,
+  type IssuedIngestToken,
   type LogSource,
   NanoApiError,
   type ParserRepository,
@@ -197,6 +200,44 @@ export class NanoClient {
       method: "POST",
       headers: this.authHeaders(),
     });
+  }
+
+  /**
+   * `GET /api/ingest-tokens`: issued tokens, the install token's state and — on a nano that binds
+   * every token to one log source (NAN-3806) — the `sources` a token can be bound to. 404 on a
+   * nano without the endpoint (older open core, hosted tenants). Needs `log_sources:view`.
+   */
+  async listIngestTokens(): Promise<IngestTokenList> {
+    return request<IngestTokenList>(`${apiBase(this.baseUrl)}/ingest-tokens`, {
+      headers: this.authHeaders(),
+    });
+  }
+
+  /**
+   * `POST /api/ingest-tokens`: issue a token bound to one log source. The value comes back once.
+   * Needs `settings:system`.
+   */
+  async createIngestToken(name: string, sourceId: string): Promise<IssuedIngestToken> {
+    return request<IssuedIngestToken>(`${apiBase(this.baseUrl)}/ingest-tokens`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...this.authHeaders() },
+      body: JSON.stringify({ name, source_id: sourceId }),
+    });
+  }
+
+  /**
+   * `POST /api/ingest-tokens/{credential_id}/bind`: bind an unbound token to a log source. A
+   * binding never changes (409 on a bound token). Needs `settings:system`.
+   */
+  async bindIngestToken(credentialId: string, sourceId: string): Promise<IngestTokenInfo> {
+    return request<IngestTokenInfo>(
+      `${apiBase(this.baseUrl)}/ingest-tokens/${encodeURIComponent(credentialId)}/bind`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...this.authHeaders() },
+        body: JSON.stringify({ source_id: sourceId }),
+      },
+    );
   }
 
   /** Run a search. Used by the verify loop to confirm logs arrived. */

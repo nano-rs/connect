@@ -1,3 +1,4 @@
+import { type IngestModel, ingestRejectionMessage } from "./ingestTokens.js";
 import { NanoApiError } from "./types.js";
 
 export interface TestEventResult {
@@ -6,7 +7,12 @@ export interface TestEventResult {
   endpoint: string;
 }
 
-async function postEvent(endpoint: string, ingestToken: string, sourceType: string, body: string): Promise<Response> {
+async function postEvent(
+  endpoint: string,
+  ingestToken: string | undefined,
+  sourceType: string,
+  body: string,
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12_000);
   try {
@@ -14,7 +20,9 @@ async function postEvent(endpoint: string, ingestToken: string, sourceType: stri
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${ingestToken}`,
+        ...(ingestToken ? { Authorization: `Bearer ${ingestToken}` } : {}),
+        // Informational on a nano that binds tokens to sources (kept as claimed_source_type); the
+        // routing key on an older one.
         "X-Source-Type": sourceType,
       },
       body,
@@ -31,11 +39,15 @@ async function postEvent(endpoint: string, ingestToken: string, sourceType: stri
  * POST a marked test event to the first ingest endpoint that accepts it. Probes the candidates in
  * order; a 2xx wins, a 401/403 means the endpoint is right but the token is wrong (surface it), and
  * anything else (redirect / 404 / unreachable) moves to the next candidate.
+ *
+ * `model` only shapes the 401/403 message: on a nano that binds tokens to log sources it almost
+ * always means the token isn't bound to one.
  */
 export async function sendTestEvent(
   endpoints: string[],
   ingestToken: string,
   sourceType: string,
+  model: IngestModel["kind"] = "legacy",
 ): Promise<TestEventResult> {
   const marker = `nano-connect-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const body = `${JSON.stringify({
@@ -57,13 +69,28 @@ export async function sendTestEvent(
     if (res.ok) return { marker, endpoint };
     if (res.status === 401 || res.status === 403) {
       const detail = await res.text().catch(() => "");
-      throw new NanoApiError(
-        "Ingest token rejected (401/403). Check VECTOR_AUTH_TOKEN matches this instance.",
-        res.status,
-        detail,
-      );
+      throw new NanoApiError(ingestRejectionMessage(res.status, model), res.status, detail);
     }
     // 3xx/404/5xx — wrong endpoint shape; keep probing.
   }
   throw new NanoApiError(`No ingest endpoint accepted the event. Tried: ${tried.join(", ")}`);
+}
+
+/**
+ * Find the ingest endpoint without a token: the right endpoint refuses an unauthenticated POST
+ * with 401/403, a wrong one redirects / 404s / doesn't answer. Used against a nano that binds
+ * tokens to log sources, where connect has no token to test with until a collector is generated.
+ * Nothing is ingested.
+ */
+export async function probeIngestEndpoint(endpoints: string[]): Promise<string | undefined> {
+  for (const endpoint of endpoints) {
+    let res: Response;
+    try {
+      res = await postEvent(endpoint, undefined, "nano_connect_probe", "{}\n");
+    } catch {
+      continue;
+    }
+    if (res.status === 401 || res.status === 403) return endpoint;
+  }
+  return undefined;
 }
