@@ -427,7 +427,7 @@ select_sources() {
       local probes=0
       while awk -v p="$assigned" '$2==p {found=1} END {exit !found}' "$WORK/selected"; do
         assigned=$((5600 + (assigned - 5599) % 100))
-        probes=$((probes + 1)); [ "$probes" -lt 100 ] || fail 'Discovered syslog port range exhausted' 
+        probes=$((probes + 1)); [ "$probes" -lt 100 ] || fail 'Discovered syslog port range exhausted'
       done
       hit="$st $assigned udp"
     fi
@@ -549,7 +549,7 @@ inputs = ["files"]
 source = '''
 .source_type = "$FILE_SOURCE"
 .src_host = get_hostname!()
-''' 
+'''
 EOF
   fi
 }
@@ -769,7 +769,7 @@ main() {
   TRANSPORT=${NANO_TRANSPORT:-hec}; TOKEN_DIR=${NANO_TOKEN_DIR:-}; ROTATE=0; RUN=0; JOURNALD=1; FILES=; FILE_SOURCE=application
   OTLP_READY=${NANO_OTLP_SOURCE_AUTH_RELEASED:-0}; AGENT_PORT=9000; WINDOW=15; DEPLOY_PARSERS=0; NATIVE_INPUT=tag; ADD_OFFICIAL=0; BUILTIN=0; YES=${NANO_YES:-0}; NONINTERACTIVE=${NANO_NON_INTERACTIVE:-0}
   CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/nano-connect-bash
-  COMMAND=connect; UPSTREAM=tag; TOKEN=; 
+  COMMAND=connect; UPSTREAM=tag; TOKEN=;
   [ -t 0 ] || NONINTERACTIVE=1
   while [ "$#" -gt 0 ]; do
     case "$1" in
