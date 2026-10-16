@@ -71,11 +71,37 @@ bash connect.sh connect --source cisco_asa --token-file /private/cisco-token --i
 
 Supply `NANO_API_KEY` privately with `log_sources:view`, `search:execute` and
 visibility of the source. UI issuance/revocation additionally needs
-`log_sources:deploy`. A search-only key cannot discover sources. A hidden prompt
+`log_sources:deploy`. A search-only key can render/send when both a private token
+file/directory and an **explicit** `--ingest-url` (or `NANO_INGEST_URL`) are supplied.
+Discovery 403s then warn that enablement and binding are unverified; no source or
+credential is created. Cached endpoints alone do not enable this fallback.
+`connect`/`verify` need only `search:execute` and visibility of the expected source
+for their searches. Missing tokens, explicit endpoints, readable disabled sources,
+and non-permission discovery errors still fail. A hidden prompt
 is available interactively instead of `--token-file`; automation can set
 `NANO_TOKEN_FILE`. Tokens are saved privately per profile/source and reused.
 For multiple sources use `--token-dir` with a separate file per canonical source.
 Pass the correct explicit ingest endpoint; discovery never guesses a token destination.
+
+Enabled tenant sources are selectable by their canonical name, including hosted
+rows whose `source_type` is `routed`. For example:
+
+```bash
+bash connect.sh add-source --sources apache_access --token-file /private/apache-token --ingest-url https://tenant.ingest.nano.rs --non-interactive
+bash connect.sh connect --source apache_access --token-file /private/apache-token --ingest-url https://tenant.ingest.nano.rs --non-interactive
+```
+
+Application/web sources use a local HTTP push listener; sources whose parser
+metadata declares syslog retain raw syslog listeners. Common built-in syslog
+ports stay unchanged. When transport metadata is unreadable, discovered sources
+default to HTTP; choose `--sources apache_access:tcp`, `:udp` or `:http` explicitly
+if needed. The upstream `--transport hec|http` is independent of the local listener.
+HTTP listeners accept raw POST bodies at `/` on their generated stable port;
+point your sender at that collector address. They have no local authentication:
+use a trusted network or authenticated reverse proxy. This does not configure
+file tailing or cloud API polling. Every upstream sink still uses its own bound
+credential. Use fresh canonical-source evidence to prove the supplied token lands
+under the requested source.
 
 `--credential-id ID` (`NANO_CREDENTIAL_ID`) optionally checks the hosted listing
 for active state, source kind, exact single-source binding and transport. The
@@ -167,6 +193,8 @@ Development checks (Python 3.11+, shellcheck; Node only for regenerating TS gold
 pnpm exec tsx tests/bash/golden.ts
 bash tests/bash/check.sh
 VECTOR_VALIDATE=1 python3 tests/bash/test.py
+# Or validate with a local upstream Vector 0.59.0 binary:
+VECTOR_BINARY=/path/to/vector python3 tests/bash/test.py
 # Optional actual Bash 3.2 path:
 TEST_BASH=/path/to/bash-3.2 python3 tests/bash/test.py
 ```

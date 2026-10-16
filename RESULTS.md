@@ -1,3 +1,45 @@
+# NAN-3942 0.4.3 — hosted routed sources and search-only discovery
+
+RESUME 3 fixes are implemented on `fix/NAN-3942-hosted-routed` from main
+`b84f69c` in the requested isolated worktree.
+
+- Hosted `source_type=routed` resolves the source's canonical `name`, so Apache
+  and other enabled tenant sources can import UI-created credentials and connect.
+- Enabled tenant sources bypass the community-only syslog filter. Application
+  parsers render HTTP push listeners; syslog metadata keeps raw socket listeners.
+  Unknown transport metadata defaults to HTTP, with explicit :tcp/:udp/:http
+  overrides. HTTP listener ports publish as TCP in Compose. HEC/HTTP upstream
+  sinks still have separate bound credentials and raw event payloads.
+- Discovery 403s permit import only with an explicitly supplied ingest endpoint
+  plus a token file/directory. Cached endpoints cannot authorize the fallback.
+  Warnings explain unavailable enablement/binding checks; fresh canonical search
+  evidence still proves delivery. Readable disabled sources and other discovery
+  errors fail. No hosted issuance, rotation or revocation API mutation is added.
+
+Validation: 112 offline CLI cases on Bash 5.3.15 and actual Bash 3.2.57, plus
+JSON/path/hash units on both, POSIX units, shellcheck, syntax/static portability,
+checksum and git whitespace checks. Retained TS structural goldens pass. Eight
+configurations, including the new Apache HTTP listener, pass upstream Vector
+0.59.0 `validate --no-environment` using a standalone binary downloaded into a
+private temporary directory. No host Docker, services or installers ran. CI also
+validates with the existing pinned upstream image digest.
+
+New regression cases cover routed Apache render/connect, disabled sources,
+HTTP/raw TCP selection, discovery-denied token-file and per-source token-directory
+flows, multiple sources, explicit environment equivalents, cached endpoint refusal,
+missing token/source file, token-discovery403, and endpoint401/404/500 refusal.
+Fixture credentials alone are used; the supplied UI token file is untouched.
+
+Coordinator must rerun full hosted b12 CLI render/connect with the UI-issued
+Apache credential and search-only key, then verify distinct collector request
+markers within two minutes. Earlier live CT108 and supplemental hosted proof are
+in the connectlive lane; this patch makes no new live acceptance claim. No release,
+npm deprecation, get.nano.rs changes, live tenant/lab calls or Slack messages.
+Linear tools were unavailable in this session; the prior lane recorded its issue
+read, and this follow-up implements the explicit RESUME 3 scope from the brief.
+
+---
+
 # NAN-3942 0.4.2 — hosted UI credential import
 
 The latest coordinator decision is implemented: hosted source credentials are

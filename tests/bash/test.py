@@ -38,9 +38,10 @@ with tempfile.TemporaryDirectory(prefix='connect-tests-') as td:
                 assert sink['encoding']['codec']=='text'
                 assert sink['buffer']=={'type':'disk','max_size':268435488,'when_full':'block'}
     def validate(label):
-        if not os.getenv('VECTOR_VALIDATE'):return
+        if not os.getenv('VECTOR_VALIDATE') and not os.getenv('VECTOR_BINARY'):return
         image='timberio/vector:0.59.0-alpine@sha256:0e36bc2a290039e9b6a5e92f04bd2f133223506f72d09682c1df16c015172b7a'
-        p=subprocess.run(['/usr/bin/docker','run','--rm','--network','none','--read-only','--mount',f'type=bind,src={tmp / "out"},dst=/fixture,readonly',image,'validate','--no-environment','/fixture/vector.toml'],text=True,capture_output=True)
+        command=([os.environ['VECTOR_BINARY'],'validate','--no-environment',str(tmp/'out/vector.toml')] if os.getenv('VECTOR_BINARY') else ['/usr/bin/docker','run','--rm','--network','none','--read-only','--mount',f'type=bind,src={tmp / "out"},dst=/fixture,readonly',image,'validate','--no-environment','/fixture/vector.toml'])
+        p=subprocess.run(command,text=True,capture_output=True)
         assert p.returncode==0,(label,p.stdout,p.stderr)
     def config():return tomllib.loads((tmp/'out/vector.toml').read_text())
     run('--version');run('--help');run('list-sources','--builtin-only');run('verify',ok=False)
@@ -126,6 +127,42 @@ with tempfile.TemporaryDirectory(prefix='connect-tests-') as td:
         p=run(*args,extra=hosted,ok=False);assert 'Settings' in p.stderr
     assert not any(method=='POST' and path.startswith('log-sources/ingest-credentials') for method,path in state()['calls'])
 
+    # Hosted real-world rows use source_type=routed with the slug in name.
+    apache_token=tmp/'apache-token'
+    run('add-source','--sources','apache_access')
+    apache_token.write_text((tmp/'out/secrets/apache_access').read_text())
+    assert config()['sources']['apache_access']['type']=='http_server'
+    validate('application HTTP listener')
+    assert config()['sources']['apache_access']['decoding']['codec']=='bytes'
+    assert config()['sinks']['nano_apache_access']['sourcetype']=='apache_access'
+    assert '/http' not in (tmp/'out/docker-compose.yml').read_text()
+    run('add-source','--sources','apache_access','--token-file',str(apache_token),extra=hosted)
+    run('connect','--source','apache_access','--token-file',str(apache_token),extra=hosted)
+    run('add-source','--sources','apache_access:tcp','--token-file',str(apache_token),extra=hosted)
+    assert config()['sources']['apache_access']['mode']=='tcp'
+    run('add-source','--sources','apache_access','--token-file',str(apache_token),extra=dict(hosted,MOCK_DISABLED='1'),ok=False)
+    supplied_hosted=tmp/'hosted-tokens';supplied_hosted.mkdir()
+    (supplied_hosted/'apache_access').write_text(apache_token.read_text())
+    (supplied_hosted/'cisco_asa').write_text(hosted_token.read_text())
+    denied=dict(hosted,MOCK_HOSTED_DENIED='1')
+    for token_args in [('--token-file',str(apache_token)),('--token-dir',str(supplied_hosted))]:
+        p=run('add-source','--sources','apache_access',*token_args,'--ingest-url','https://tenant.ingest.nano.test',extra=denied)
+        assert 'discovery forbidden' in p.stdout.lower() and 'unverified' in p.stdout
+        assert config()['sources']['apache_access']['type']=='http_server'
+        run('connect','--source','apache_access',*token_args,'--ingest-url','https://tenant.ingest.nano.test',extra=denied)
+        run('connect','--source','apache_access',*token_args,extra=denied,ok=False) # cached URL is insufficient
+    run('connect','--source','apache_access','--token-file',str(apache_token),'--ingest-url','https://tenant.ingest.nano.test',extra=dict(denied,MOCK_TOKEN_STATUS='403'))
+    run('connect','--source','apache_access',extra=dict(denied,NANO_TOKEN_FILE=str(apache_token),NANO_INGEST_URL='https://tenant.ingest.nano.test'))
+    for status in ('401','404','500'):
+        run('connect','--source','apache_access','--token-file',str(apache_token),'--ingest-url','https://tenant.ingest.nano.test',extra=dict(denied,MOCK_ENDPOINT_STATUS=status),ok=False)
+    run('add-source','--sources','apache_access,cisco_asa','--token-dir',str(supplied_hosted),'--ingest-url','https://tenant.ingest.nano.test',extra=denied)
+    assert set(config()['sinks']) >= {'nano_apache_access','nano_cisco_asa'}
+    run('connect','--source','apache_access','--ingest-url','https://tenant.ingest.nano.test',extra=denied,ok=False)
+    run('connect','--source','palo_alto','--token-dir',str(supplied_hosted),'--ingest-url','https://tenant.ingest.nano.test',extra=denied,ok=False)
+    run('add-source','--sources','apache_access','--token-file',str(apache_token),'--ingest-url','https://tenant.ingest.nano.test','--rotate',extra=denied,ok=False)
+    assert apache_token.read_text()==(supplied_hosted/'apache_access').read_text()
+    assert not any(method=='POST' and path.startswith('log-sources/ingest-credentials') for method,path in state()['calls'])
+
     run('add-source','--sources','x"\n[sinks.evil]',ok=False)
     run('add-source','--transport','native',ok=False)
     run('add-source','--ingest-token','fixture-secret',ok=False)
@@ -167,7 +204,9 @@ with tempfile.TemporaryDirectory(prefix='connect-tests-') as td:
     assert len(pending)==1 and len([t for t in state()['tokens'] if t['route_key']=='cisco_asa' and t['state']=='active'])==2
     run('add-source','--sources','cisco_asa')
     assert not pending[0].exists() and len([t for t in state()['tokens'] if t['route_key']=='cisco_asa' and t['state']=='active'])==1
-    run('add-source','--sources','routeros',extra={'MOCK_CLOUD':'1'},ok=False)
+    run('add-source','--sources','routeros',extra={'MOCK_CLOUD':'1'})
+    assert config()['sources']['routeros']['type']=='http_server'
+    run('add-source','--sources','routeros',extra={'MOCK_CLOUD':'1','MOCK_DISABLED':'1'},ok=False)
     run('add-agent','--os','linux','--no-journald','--files','/var/log/a.log,/var/log/b.log')
     assert config()['sources']['files']['include']==['/var/log/a.log','/var/log/b.log']
     validate('multiple file paths')

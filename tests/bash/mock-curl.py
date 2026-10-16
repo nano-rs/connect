@@ -9,16 +9,17 @@ url=args[-1]; path=url.split('/api/',1)[-1]; method=arg('--request')
 headers=pathlib.Path(arg('--header')[1:]).read_text()
 body=pathlib.Path(arg('--data-binary')[1:]).read_text(); data=json.loads(body) if body else {}
 status=200; result={}
-sts=['cisco_asa','palo_alto','fortinet','cisco_ios','juniper_srx','sonicwall','pfsense','linux_syslog','f5_bigip','windows_event','windows_sysmon','linux_journald','linux_sysmon','application','routeros']
+sts=['cisco_asa','palo_alto','fortinet','cisco_ios','juniper_srx','sonicwall','pfsense','linux_syslog','f5_bigip','windows_event','windows_sysmon','linux_journald','linux_sysmon','application','routeros','apache_access']
 sources=[dict(source_id='src-'+st,route_key=st,enabled=True) for st in sts if not (os.getenv('MOCK_MISSING')==st and not s.get('published'))]
 if os.getenv('MOCK_DISABLED'): sources=[dict(x,enabled=False) for x in sources]
 s['calls'].append([method,path])
 if os.getenv('MOCK_HTTP_ERROR'): status=int(os.environ['MOCK_HTTP_ERROR'])
-elif os.getenv('MOCK_HOSTED') and path=='ingest-tokens': status=404
+elif os.getenv('MOCK_HOSTED') and path=='ingest-tokens': status=int(os.getenv('MOCK_TOKEN_STATUS','404'))
 elif os.getenv('MOCK_HOSTED') and path=='log-sources/ingest-endpoint':
-    status=403 if os.getenv('MOCK_HOSTED_DENIED') else 200
+    status=int(os.getenv('MOCK_ENDPOINT_STATUS','403' if os.getenv('MOCK_HOSTED_DENIED') else '200'))
     result={'base_url':'https://tenant.ingest.nano.test'}
-elif os.getenv('MOCK_HOSTED') and path=='log-sources/ingest-credentials': result={'credentials':json.loads(os.getenv('MOCK_HOSTED_CREDENTIALS','[]')), 'requests':[]}; status=403 if os.getenv('MOCK_METADATA_DENIED') else 200
+elif os.getenv('MOCK_HOSTED_DENIED') and path in ('log-sources','parser-repositories'): status=403
+elif os.getenv('MOCK_HOSTED') and path=='log-sources/ingest-credentials': result={'credentials':json.loads(os.getenv('MOCK_HOSTED_CREDENTIALS','[]')), 'requests':[]}; status=403 if (os.getenv('MOCK_METADATA_DENIED') or os.getenv('MOCK_HOSTED_DENIED')) else 200
 elif path=='setup/status': result={'initialized':True}
 elif path=='ingest-tokens' and method=='GET':
     result={'tokens':s['tokens'],'sources':sources}
@@ -39,9 +40,10 @@ elif path.startswith('ingest-tokens/'):
         if out: assert (pathlib.Path(out)/'secrets'/cred['route_key']).read_text() != 'nit_'+('%08d'%int(cid.split('-')[1]))+'-fixture-secret'
         cred['state']='revoked'
     else: cred.update(source_id=data['source_id'],route_key=data['source_id'].removeprefix('src-'),state='active')
-elif path=='log-sources': result=[dict(id=x['source_id'],name=x['route_key'],match_values=[x['route_key']],deployed=True) for x in sources]
+elif path=='log-sources':
+    result=[dict(id=x['source_id'],name=x['route_key'],source_type='routed',enabled=x['enabled'],match_values=[x['route_key']],deployed=True) for x in sources]
 elif path=='parser-repositories': result=[dict(id='repo-1',name='official',url='https://github.com/nano-rs/parsers',enabled=True)]
-elif path.endswith('/parsers'): result=[dict(id='parser-1',name='routeros',file_path='network/router os#?.yaml',raw_content=('category: cloud\ntransports: [api]\n' if os.getenv('MOCK_CLOUD') else 'category: network\ntransports: [syslog]\n')+'match_values:\n  - routeros\n  - mikrotik\n')]
+elif path.endswith('/parsers'): result=[dict(id='parser-1',name='routeros',file_path='network/router os#?.yaml',raw_content=('category: cloud\ntransports: [api]\n' if os.getenv('MOCK_CLOUD') else 'category: network\ntransports: [syslog]\n')+'match_values:\n  - routeros\n  - mikrotik\n'),dict(id='parser-apache',name='apache_access',raw_content='category: application\ntransports: [http]\n')]
 elif '/parsers/import/' in path:
     assert 'router%20os%23%3F.yaml' in path
     result={'log_source_id':'src-routeros'}
