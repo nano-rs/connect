@@ -1,3 +1,111 @@
+# nano connect
+
+The standalone Bash script is the primary installation path. It needs Bash 3.2+,
+curl and standard Unix tools; Node/npm and jq are optional. The npm implementation
+remains in this repository and stays published until the coordinator completes
+live parity proof. This branch adds the release assets; the download below becomes
+available after its first versioned release.
+
+```bash
+curl -fsSL https://github.com/nano-rs/connect/releases/latest/download/connect.sh -o connect.sh && bash connect.sh
+```
+
+For automation, download both `connect.sh` and `connect.sh.sha256` from the **same
+versioned release**, then run `sha256sum --check connect.sh.sha256` before execution.
+The script version is available with `bash connect.sh --version`.
+
+```bash
+export NANO_URL=https://nano.example.com
+# Supply an administrator API key via your secret manager as NANO_API_KEY.
+bash connect.sh list-sources --builtin-only
+bash connect.sh add-source --sources cisco_asa,palo_alto:tcp --deploy-parsers --non-interactive
+bash connect.sh add-agent --os linux --non-interactive
+bash connect.sh add-agent --os windows --non-interactive
+bash connect.sh add-aggregator --sources cisco_asa --non-interactive
+bash connect.sh connect --source cisco_asa --non-interactive
+bash connect.sh verify --source cisco_asa --non-interactive
+bash connect.sh sync-parsers --add-official --non-interactive
+```
+
+Generation writes artifacts under `./onboarding/` and does not start services.
+`--out-dir` chooses another directory. `--run` explicitly pulls and starts the
+syslog collector or aggregator with Docker Compose and waits for health. Execute the generated
+Windows PowerShell installer on the Windows endpoint. Agents use endpoint services. Linux systemd instructions
+are in the generated service file. Both require installing Vector on the intended
+endpoint; the client itself never runs an installer or systemd.
+
+Every source gets its own named bound ingest credential. The default transport is
+HEC (with indexer acknowledgements and the original event message); `--transport
+http --ingest-url https://nano.example.com/ingest/` uses a per-source Bearer token
+and raw text. Set `--ingest-url` to the correct HEC **base URL** for split/hosted
+deployments, e.g. `https://tenant.ingest.nano.rs`. API and ingest hosts may differ.
+There is no shared install-token fallback and no direct native uplink to nano.
+`--target host:9000` generates an offline native agent hop to a trusted private
+aggregator; this hop requires network isolation and has no token authentication.
+
+For existing named credentials, use `--token-dir /private/source-tokens` with one
+file per canonical source type. The API checks binding/state, binds unbound tokens,
+and rejects wrong-source or ambiguous tokens. It requires the current source-binding
+API and `settings:system` plus search/parser permissions as applicable. A missing
+source must be imported and published first (`--deploy-parsers` opts into doing so).
+Profiles and credentials are isolated per instance in
+`$XDG_CONFIG_HOME/nano-connect-bash` (default `~/.config/nano-connect-bash`).
+Legacy npm profiles and install `.env` secrets are deliberately not imported.
+`--env-file` reads only `BASE_URL` and never executes file content.
+
+Token directories are 0700 and token files 0600. Collector configs use Vector's
+secret directory backend; no tokens appear in TOML or terminal output. Windows
+installer artifacts restrict the secret directory ACL to Administrators and SYSTEM.
+Rotate with `bash connect.sh rotate-token --source cisco_asa --out-dir
+./onboarding/add-source --non-interactive`, then reload the collector. Replacement
+state and artifact secrets are saved atomically before revoking the old credential.
+A pending-revocation journal allows recovery on the next run if revocation fails.
+Each collector directory is an independent artifact: regenerate other copies before
+revoking a credential they still use. Do not run concurrent rotations for one instance.
+
+`--yes` selects non-interactive defaults and permits prompted parser/key creation;
+`--non-interactive` fails on required missing values without authorizing optional
+changes. All required prompts have flag/environment equivalents (`--help`).
+`NO_COLOR` disables colors; redirected output is always plain text. For optional
+JSON extraction, jq handles Unicode escapes; without jq the tested narrow awk/sed
+extractors handle the known ASCII credential/route fields, escaped quotes,
+backslashes and nested records. Unicode escapes in requested scalar fields fail
+closed without jq; install jq if a parser catalog uses those escaped identifiers.
+
+`otlp-config --source <type> --out-dir <dir>` generates a private `otel.env` for
+an OTLP/HTTP protobuf exporter. **Blocked on a server shipping
+[nanosiem #6811](https://github.com/nano-rs/nanosiem/pull/6811)** (open/unreleased
+when implemented); opt in only then with `NANO_OTLP_SOURCE_AUTH_RELEASED=1`.
+The public endpoint is `/otlp/v1/{logs,metrics,traces}`. nginx calls
+`/api/internal/otlp-auth` on every request, injects the verified credential/source
+identity, and fails closed for revoked/unbound credentials or disabled sources.
+The client never calls that internal endpoint or falls back to raw OTLP ports.
+Use a separate exporter configuration/credential per source. Regenerate `otel.env`
+after rotation before restarting the exporter.
+
+Collector images pin upstream Vector 0.59.0 by digest, matching the Ludus sender:
+the trimmed nano server image lacks HEC sender/edge components and cannot run
+these collectors. See [PARITY.md](PARITY.md) for behavior changes and
+[RESULTS.md](RESULTS.md) for validation and outstanding coordinator proof.
+
+Development checks (Python 3.11+, shellcheck; Node only for regenerating TS goldens):
+
+```bash
+pnpm exec tsx tests/bash/golden.ts
+bash tests/bash/check.sh
+VECTOR_VALIDATE=1 python3 tests/bash/test.py
+# Optional actual Bash 3.2 path:
+TEST_BASH=/path/to/bash-3.2 python3 tests/bash/test.py
+```
+
+The Vector check runs only `validate --no-environment` in a read-only, networkless
+container with a temporary artifact mount. Deployment tests stub curl, Docker,
+sudo and systemctl. No test starts a collector or touches a tenant.
+
+---
+
+## Retained npm CLI documentation
+
 # @nano-rs/connect
 
 > Get your logs into [nano](https://nano.rs) in minutes.
