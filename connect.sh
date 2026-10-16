@@ -4,7 +4,7 @@
 set +x
 set -euo pipefail
 umask 077
-VERSION=0.4.2
+VERSION=0.4.3
 VECTOR_IMAGE='timberio/vector:0.59.0-alpine@sha256:0e36bc2a290039e9b6a5e92f04bd2f133223506f72d09682c1df16c015172b7a'
 fail() { printf 'connect: %s\n' "$*" >&2; exit 1; }
 note() { if [ -t 1 ] && [ -z "${NO_COLOR+x}" ]; then printf '\033[36m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
@@ -211,14 +211,23 @@ profile() {
 catalog() {
   printf '%s\n' 'cisco_asa 5514 udp' 'palo_alto 5515 tcp' 'fortinet 5516 udp' 'cisco_ios 5517 udp' 'juniper_srx 5518 udp' 'sonicwall 5519 udp' 'pfsense 5520 udp' 'linux_syslog 5521 udp' 'f5_bigip 5522 tcp'
 }
-# Only enabled bindable sources can receive credentials.
+# Discovery may be skipped only with an explicitly supplied destination and token.
+supplied_hosted() {
+  [ "$EXPLICIT_INGEST_URL" = 1 ] && { [ -n "$TOKEN_FILE" ] || [ -n "$TOKEN_DIR" ]; }
+}
+# Only enabled bindable sources can receive credentials when discovery is readable.
 load_tokens() {
   if request GET "$URL/api/ingest-tokens"; then
     DEPLOYMENT=open-core
-  elif [ "$HTTP_CODE" = 404 ]; then
-    # A 404 alone is not hosted detection: prove the alternate API exists.
-    api GET log-sources/ingest-endpoint
-    get base_url "$RESPONSE" >/dev/null || fail 'Unknown deployment: no hosted ingest endpoint contract'
+  elif [ "$HTTP_CODE" = 404 ] || { [ "$HTTP_CODE" = 403 ] && supplied_hosted; }; then
+    # With denied discovery, an explicit token + destination permits import only.
+    if request GET "$URL/api/log-sources/ingest-endpoint"; then
+      get base_url "$RESPONSE" >/dev/null || fail 'Unknown deployment: no hosted ingest endpoint contract'
+    elif [ "$HTTP_CODE" = 403 ] && supplied_hosted; then
+      note 'Discovery forbidden (log_sources:view); using explicitly supplied ingest URL and source credential. Binding must be proven with fresh search evidence'
+    else
+      fail "Ingest endpoint discovery failed (HTTP $HTTP_CODE); requires log_sources:view, or supply --token-file/--token-dir and --ingest-url"
+    fi
     DEPLOYMENT=hosted
     if [ "$ROTATE" = 1 ] || [ "$COMMAND" = revoke-token ]; then
       fail 'Hosted rotate/revoke: use Settings → ingest credentials for that source; create and save the replacement before revoking the old credential, then rerun with --token-file'
@@ -231,12 +240,23 @@ load_tokens() {
     else
       note 'Hosted credential metadata unavailable; log_sources:view and source visibility are needed. Verify fresh request evidence before trusting delivery'
     fi
-    api GET log-sources
-    printf '%s' "$RESPONSE" | records log_sources > "$WORK/hosted-sources" || fail 'Malformed hosted source listing'
+    DISCOVERY_UNAVAILABLE=0
+    if request GET "$URL/api/log-sources"; then
+      printf '%s' "$RESPONSE" | records log_sources > "$WORK/hosted-sources" || fail 'Malformed hosted source listing'
+    elif [ "$HTTP_CODE" = 403 ] && supplied_hosted; then
+      DISCOVERY_UNAVAILABLE=1
+      : > "$WORK/hosted-sources"
+      note 'Source discovery forbidden (log_sources:view); source enablement/binding unverified. search:execute and source visibility are required for connect/verify'
+    else
+      fail "Source discovery failed (HTTP $HTTP_CODE); requires log_sources:view, or supply --token-file/--token-dir and --ingest-url"
+    fi
     : > "$WORK/sources"; : > "$WORK/tokens"
     local row st sid
     while IFS= read -r row; do
-      st=$(get source_type "$row" || get name "$row") || fail 'Hosted source lacks source type'
+      st=$(get source_type "$row" || :)
+      # Hosted source_type describes ingestion (routed), not the canonical slug.
+      case "$st" in routed|'') st=$(get name "$row") || fail 'Hosted source lacks name' ;; esac
+      safe_id "$st"
       sid=$(get id "$row") || fail 'Hosted source lacks id'
       if [ "$(get enabled "$row" || :)" != false ]; then
         printf '{"source_id":%s,"route_key":%s,"enabled":true}\n' "$(q "$sid")" "$(q "$st")" >> "$WORK/sources"
@@ -259,6 +279,11 @@ source_id() {
       found=$(get source_id "$row") || fail 'Missing source id'
     fi
   done < "$WORK/sources"
+  if [ -z "$found" ] && [ "${DISCOVERY_UNAVAILABLE:-0}" = 1 ]; then
+    if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ]; then found=supplied
+    elif [ -n "$TOKEN_DIR" ] && [ -f "$TOKEN_DIR/$1" ]; then found=supplied
+    fi
+  fi
   [ -n "$found" ] || return 1
   printf '%s' "$found"
 }
@@ -491,7 +516,7 @@ select_sources() {
   catalog > "$WORK/catalog"
   if [ -z "$SOURCES" ]; then
     if [ "$COMMAND" = add-source ]; then SOURCES=$(catalog | awk '{print $1}' | paste -sd, -); else SOURCES=; fi
-    if [ "$NONINTERACTIVE" = 0 ]; then SOURCES=$(prompt 'Comma-separated syslog sources (--sources)' "$SOURCES"); fi
+    if [ "$NONINTERACTIVE" = 0 ]; then SOURCES=$(prompt 'Comma-separated sources (--sources; :udp/:tcp/:http)' "$SOURCES"); fi
   fi
   : > "$WORK/selected"
   local selector st mode hit row assigned=5600
@@ -501,7 +526,7 @@ select_sources() {
     selector=$(printf '%s' "$selector" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
     [ -n "$selector" ] || continue
     st=${selector%%:*}; safe_id "$st"; mode=
-    case "$selector" in *:*) mode=${selector#*:}; case "$mode" in udp|tcp) ;; *) fail 'Use :udp or :tcp' ;; esac ;; esac
+    case "$selector" in *:*) mode=${selector#*:}; case "$mode" in udp|tcp|http) ;; *) fail 'Use :udp, :tcp or :http' ;; esac ;; esac
     hit=$(awk -v st="$st" '$1==st {print}' "$WORK/catalog")
     if [ -z "$hit" ]; then st=$(canonical_source "$st"); safe_id "$st"; fi
     if awk -v st="$st" '$1==st {found=1} END {exit !found}' "$WORK/selected"; then continue; fi
@@ -509,9 +534,15 @@ select_sources() {
     if [ -z "$hit" ]; then
       local parser_row
       parser_row=$(lookup_parser "$st" || :)
-      if [ -n "$parser_row" ]; then syslog_collectable "$parser_row" || fail 'This parser is not a syslog source; use its endpoint/cloud integration'; fi
-      if ! source_id "$st" >/dev/null; then
-        [ -n "$parser_row" ] || fail "Unknown syslog source: $st"
+      local default_mode=udp
+      if source_id "$st" >/dev/null; then
+        # Enabled tenant sources are connectable even for app/web parsers.
+        # Unknown transport metadata defaults to an HTTP push listener.
+        default_mode=http
+        if [ -n "$parser_row" ] && syslog_collectable "$parser_row"; then default_mode=udp; fi
+      else
+        [ -n "$parser_row" ] || fail "Unknown source: $st"
+        syslog_collectable "$parser_row" || fail 'This parser is not a syslog source; deploy/enable its source first or use its endpoint/cloud integration'
       fi
       # Stable checksum-based ports, collision probe within a separate range.
       assigned=$(hash_port "$st")
@@ -520,7 +551,7 @@ select_sources() {
         assigned=$((5600 + (assigned - 5599) % 100))
         probes=$((probes + 1)); [ "$probes" -lt 100 ] || fail 'Discovered syslog port range exhausted'
       done
-      hit="$st $assigned udp"
+      hit="$st $assigned $default_mode"
     fi
     if [ -n "$mode" ]; then hit=$(printf '%s\n' "$hit" | awk -v m="$mode" '{print $1,$2,m}'); fi
     printf '%s\n' "$hit" >> "$WORK/selected"
@@ -528,6 +559,24 @@ select_sources() {
 }
 render_socket() {
   local st=$1 port=$2 mode=$3
+  if [ "$mode" = http ]; then
+    cat <<EOF
+[sources.$st]
+type = "http_server"
+address = "0.0.0.0:$port"
+[sources.$st.decoding]
+codec = "bytes"
+[transforms.${st}_tag]
+type = "remap"
+inputs = ["$st"]
+source = '''
+.source_type = "$st"
+.src_host = to_string(.host) ?? ""
+'''
+
+EOF
+    return
+  fi
   cat <<EOF
 [sources.$st]
 type = "socket"
@@ -688,7 +737,7 @@ EOF
     printf '    ports:\n'
     [ "$COMMAND" != add-aggregator ] || printf '      - "%s:%s"\n' "$AGENT_PORT" "$AGENT_PORT"
     local st p m
-    while read -r st p m; do printf '      - "%s:%s/%s"\n' "$p" "$p" "$m"; done < "$WORK/selected"
+    while read -r st p m; do [ "$m" != http ] || m=tcp; printf '      - "%s:%s/%s"\n' "$p" "$p" "$m"; done < "$WORK/selected"
   fi
   printf '    healthcheck:\n      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9598/metrics"]\n      interval: 15s\n      timeout: 5s\n      retries: 3\nvolumes:\n  nano-data:\n'
 }
@@ -886,7 +935,7 @@ Usage: bash connect.sh [connect|add-source|add-agent|add-aggregator|list-sources
   --env-file FILE (read BASE_URL only; never execute)
   --transport hec|http (default hec; direct native nano uplink refused)
   --ingest-url URL / NANO_INGEST_URL     --search-url URL / NANO_SEARCH_URL
-  --source TYPE / NANO_SOURCE           --sources a,b:tcp / NANO_SOURCES
+  --source TYPE / NANO_SOURCE           --sources a,b:tcp,c:http / NANO_SOURCES
   --token-file FILE / NANO_TOKEN_FILE (hosted single-source credential)
   --credential-id ID / NANO_CREDENTIAL_ID (optional hosted metadata check)
   --token-dir DIR / NANO_TOKEN_DIR (one named source credential per file)
@@ -942,6 +991,8 @@ main() {
       *) fail 'Unknown command or flag; see --help' ;;
     esac
   done
+  EXPLICIT_INGEST_URL=0; [ -z "$INGEST_URL" ] || EXPLICIT_INGEST_URL=1
+  DISCOVERY_UNAVAILABLE=0
   case "$TRANSPORT" in hec|http) ;; *) fail 'Use hec or http; native nano uplink bypasses source-bound credentials' ;; esac
   if ! [[ "$WAIT_SECONDS" =~ ^[0-9]{1,3}$ ]] || [ "$WAIT_SECONDS" -gt 120 ]; then fail 'Evidence deadline must be 0-120 seconds'; fi
   WAIT_SECONDS=$((10#$WAIT_SECONDS))

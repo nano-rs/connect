@@ -15,7 +15,7 @@ shared-token sink would violate the new credential contract.
 | `addAgent.ts` | `render_agent`, `render`, `platform_artifacts` | Linux/Windows TS golden, native trusted target, file-only collection |
 | `addAggregator.ts` | `render`, `compose`; agents + optional per-port syslog | TS source golden and Vector validation |
 | `listSources.ts` | `catalog`, `load_tokens`, `load_catalog`; built-ins, bindable instance routes, community syslog parsers | offline builtins and API harness |
-| `selectSources.ts` | `select_sources`, `canonical_source`; comma-separated read prompt, :udp/:tcp, aliases, dedup | selector, alias, wrong transport tests |
+| `selectSources.ts` | `select_sources`, `canonical_source`; comma-separated read prompt, :udp/:tcp/:http, aliases, dedup | selector, alias, wrong transport tests |
 | `syncParsers.ts` | `parsers`; official registration, enabled repositories, bounded sync poll | sync fixture; explicit errors for missing status/timeouts |
 | `reviewParsers.ts` | `review_parser`; opt-in import + publish; success=false fails | missing-source import path escaped; publish fixture |
 | `runHere.ts` | `run_here`; explicit --run, Compose v2 checks/pull/up/health | PATH-stubbed Docker; no real deployment |
@@ -92,3 +92,13 @@ persists user-created source tokens; optional credential ID checks kind, source,
 state and protocol. The list has no fingerprint, so fresh canonical connectivity
 evidence proves secret binding. Offline import/reuse, denied metadata, mismatched
 metadata, HTTP/HEC, multi-source file refusal and UI lifecycle guidance are tested.
+
+## Hosted routed/source discovery follow-up (0.4.3)
+
+Enabled tenant sources bypass the community-only syslog gate. Application parsers
+render raw HTTP push listeners; declared syslog sources retain socket listeners.
+Hosted routed rows resolve their canonical name. An explicit private token plus
+explicit ingest URL permits import when discovery returns 403, with enablement
+and binding warnings and fresh canonical search proof still required. Tests cover
+routed Apache render/connect, transport overrides, search-only discovery denial,
+per-source token directories, missing arguments and disabled sources.
