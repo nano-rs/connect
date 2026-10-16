@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """No sockets: a curl protocol double with persisted credential lifecycle state."""
-import json, os, pathlib, sys, hashlib
+import json, os, pathlib, sys, hashlib, re
 args=sys.argv[1:]
 def arg(k): return args[args.index(k)+1]
 root=pathlib.Path(os.environ['MOCK_ROOT']); f=root/'state.json'
@@ -14,6 +14,11 @@ sources=[dict(source_id='src-'+st,route_key=st,enabled=True) for st in sts if no
 if os.getenv('MOCK_DISABLED'): sources=[dict(x,enabled=False) for x in sources]
 s['calls'].append([method,path])
 if os.getenv('MOCK_HTTP_ERROR'): status=int(os.environ['MOCK_HTTP_ERROR'])
+elif os.getenv('MOCK_HOSTED') and path=='ingest-tokens': status=404
+elif os.getenv('MOCK_HOSTED') and path=='log-sources/ingest-endpoint':
+    status=403 if os.getenv('MOCK_HOSTED_DENIED') else 200
+    result={'base_url':'https://tenant.ingest.nano.test'}
+elif os.getenv('MOCK_HOSTED') and path=='log-sources/ingest-credentials': result={'credentials':json.loads(os.getenv('MOCK_HOSTED_CREDENTIALS','[]')), 'requests':[]}; status=403 if os.getenv('MOCK_METADATA_DENIED') else 200
 elif path=='setup/status': result={'initialized':True}
 elif path=='ingest-tokens' and method=='GET':
     result={'tokens':s['tokens'],'sources':sources}
@@ -45,13 +50,26 @@ elif path.endswith('/sync/status'): result={'status':'completed','parser_count':
 elif path.endswith('/sync'): result={}
 elif path=='search':
     rows=s['events'] or json.loads(os.getenv('MOCK_RESULTS','[]'))
+    if 'metadata.log_source=' in data['query']:
+        st, marker=re.fullmatch(r'metadata.log_source="([a-z0-9_-]+)" AND "([A-Za-z0-9_-]+)"',data['query']).groups()
+        s['evidence_searches']=s.get('evidence_searches',0)+1
+        if os.getenv('MOCK_DELAYED_EVIDENCE') and st=='palo_alto' and s['evidence_searches']==2: rows=[]
+        rows=[r for r in rows if marker in json.dumps(r) and r.get('metadata',{}).get('log_source',r.get('metadata.log_source'))==st]
     result={'results':rows,'total_count':len(rows)}
 elif path=='auth/login':result={'tokens':{'access_token':'fixture-jwt-secret'}}
 elif path=='api-keys':result={'id':'key-1','key':'fixture-api-secret'}
 elif '/services/collector/event' in path or '/ingest/' in url:
     assert 'Authorization:' in headers
     if 'event' in data: assert isinstance(data['event'],str), 'HEC event must be original string'
-    s['events'].append({'message':data.get('event',data.get('message'))})
+    token=re.search(r'Authorization: (?:Splunk|Bearer) (\S+)',headers).group(1)
+    cred=next(t for t in s['tokens'] if t['token_prefix']==token[:12])
+    if '/services/collector/event' in path:
+        channel=re.search(r'X-Splunk-Request-Channel: ([0-9a-f-]+)',headers).group(1)
+        assert re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',channel)
+        old=s.setdefault('channels',{}).setdefault(cred['route_key'],channel)
+        assert old==channel, 'HEC channel changed for source'
+    # Routing is token-authoritative, even when the payload claims another source.
+    s['events'].append({'message':data.get('event',data.get('message')), 'metadata':{'log_source':cred['route_key'], 'ingest_credential_id':cred['credential_id']}})
     result={'text':'Success','code':0}
 else: status=404
 f.write_text(json.dumps(s))

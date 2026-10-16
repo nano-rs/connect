@@ -63,7 +63,69 @@ with tempfile.TemporaryDirectory(prefix='connect-tests-') as td:
     run('add-agent','--os','linux','--target','127.0.0.1:9000'); assert config()['sinks']['out']['address']=='127.0.0.1:9000';validate('native agent')
     run('add-aggregator','--sources','cisco_asa');assert config()['sources']['agents']['address']=='0.0.0.0:9000';validate('aggregator');golden('aggregator')
     run('sync-parsers');run('connect','--source','cisco_asa')
+    run('connect','--source','cisco_asa') # same private channel survives another CLI process
+    channel_files=list((home/'config').glob('nano-connect-bash/*/channels/cisco_asa'))
+    assert len(channel_files)==1 and stat.S_IMODE(channel_files[0].stat().st_mode)==0o600
+    run('connect','--source','palo_alto')
+    assert state()['channels']['cisco_asa']!=state()['channels']['palo_alto']
+    run('connect','--source','cisco_asa','--transport','http')
     run('verify','--source','cisco_asa',extra={'MOCK_RESULTS':'[{"src_ip":"10.0.0.1"}]'})
+    evidence=tmp/'evidence.txt'
+    evidence.write_text('cisco_asa source-a-request-001\npalo_alto source-b-request-002\n')
+    rows=[{'message':'source-a-request-001','metadata':{'log_source':'cisco_asa'}},
+          {'message':'source-b-request-002','metadata':{'log_source':'palo_alto'}}]
+    s=state();s['events']=rows;(tmp/'state.json').write_text(json.dumps(s))
+    run('verify','--evidence-file',str(evidence),'--wait-seconds','0')
+    s=state();s['evidence_searches']=0;(tmp/'state.json').write_text(json.dumps(s))
+    run('verify','--evidence-file',str(evidence),'--wait-seconds','3',extra={'MOCK_DELAYED_EVIDENCE':'1'})
+    assert state()['evidence_searches']==3 # A remembered; only missing B polled again.
+    evidence.write_text('cisco_asa source-a-request-001')
+    run('verify','--evidence-file',str(evidence),'--wait-seconds','0')
+    evidence.write_text('cisco_asa missing-request-marker\n')
+    run('verify','--evidence-file',str(evidence),'--wait-seconds','1',ok=False)
+    # Different requests for the same source must each be found.
+    evidence.write_text('cisco_asa source-a-request-001\ncisco_asa source-a-request-003\n')
+    run('verify','--evidence-file',str(evidence),'--wait-seconds','0',ok=False)
+    evidence.write_text('palo_alto source-a-request-001\n')
+    run('verify','--evidence-file',str(evidence),'--wait-seconds','0',ok=False)
+    evidence.write_text('cisco_asa source-a-request-001\npalo_alto source-a-request-001\n')
+    run('verify','--evidence-file',str(evidence),'--wait-seconds','0',ok=False)
+    run('verify','--evidence-file',str(evidence),'--wait-seconds','121',ok=False)
+    # Simulate a claim of B sent with A's token: the server stores it under A.
+    token=(tmp/'out/secrets/cisco_asa').read_text()
+    headers=tmp/'headers';body=tmp/'body';response=tmp/'response'
+    headers.write_text('Authorization: Splunk '+token+'\nX-Splunk-Request-Channel: '+state()['channels']['cisco_asa']+'\n')
+    body.write_text(json.dumps({'sourcetype':'palo_alto','event':'authoritative-routing-marker'}))
+    subprocess.run([str(bin/'curl'),'--request','POST','--header','@'+str(headers),'--data-binary','@'+str(body),'--output',str(response),'https://nano.test/services/collector/event'],env=env,check=True,capture_output=True)
+    assert state()['events'][-1]['metadata']['log_source']=='cisco_asa'
+    evidence.write_text('cisco_asa authoritative-routing-marker\n')
+    run('verify','--evidence-file',str(evidence),'--wait-seconds','0')
+    evidence.write_text('palo_alto authoritative-routing-marker\n')
+    run('verify','--evidence-file',str(evidence),'--wait-seconds','0',ok=False)
+    p=run('add-source','--sources','cisco_asa',extra={'MOCK_HOSTED':'1'},ok=False)
+    assert 'Settings' in p.stderr and '--token-file' in p.stderr
+    assert ['GET','log-sources/ingest-credentials'] in state()['calls']
+    p=run('add-source','--sources','cisco_asa',extra={'MOCK_HOSTED':'1','MOCK_HOSTED_DENIED':'1'},ok=False)
+    assert 'log_sources:view' in p.stderr
+
+    hosted_token=tmp/'hosted-token';hosted_token.write_text(token)
+    hosted={'MOCK_HOSTED':'1'}
+    run('add-source','--sources','cisco_asa','--token-file',str(hosted_token),extra=hosted)
+    assert stat.S_IMODE(next((home/'config').glob('nano-connect-bash/*/credentials/cisco_asa/hosted-token')).stat().st_mode)==0o600
+    run('connect','--source','cisco_asa','--token-file',str(hosted_token),extra=hosted)
+    run('connect','--source','cisco_asa','--transport','http',extra=hosted)
+    run('add-source','--sources','cisco_asa',extra=dict(hosted,MOCK_METADATA_DENIED='1'))
+    metadata={'credential_id':'hosted-1','kind':'source','state':'active','protocol':'hec','source_slugs':['cisco_asa']}
+    hm=dict(hosted,MOCK_HOSTED_CREDENTIALS=json.dumps([metadata]))
+    run('add-source','--sources','cisco_asa','--credential-id','hosted-1',extra=hm)
+    for key,value in [('state','revoked'),('kind','collector'),('protocol','nano_https'),('source_slugs',['palo_alto'])]:
+        run('add-source','--sources','cisco_asa','--credential-id','hosted-1',extra=dict(hosted,MOCK_HOSTED_CREDENTIALS=json.dumps([dict(metadata,**{key:value})])),ok=False)
+    run('add-source','--sources','cisco_asa','--credential-id','unknown',extra=hm,ok=False)
+    run('add-source','--sources','cisco_asa,palo_alto','--token-file',str(hosted_token),extra=hosted,ok=False)
+    for args in [('rotate-token','--source','cisco_asa','--out-dir',str(tmp/'out')),('revoke-token','--source','cisco_asa'),('add-source','--sources','cisco_asa','--rotate')]:
+        p=run(*args,extra=hosted,ok=False);assert 'Settings' in p.stderr
+    assert not any(method=='POST' and path.startswith('log-sources/ingest-credentials') for method,path in state()['calls'])
+
     run('add-source','--sources','x"\n[sinks.evil]',ok=False)
     run('add-source','--transport','native',ok=False)
     run('add-source','--ingest-token','fixture-secret',ok=False)

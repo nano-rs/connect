@@ -4,7 +4,7 @@
 set +x
 set -euo pipefail
 umask 077
-VERSION=0.4.0
+VERSION=0.4.2
 VECTOR_IMAGE='timberio/vector:0.59.0-alpine@sha256:0e36bc2a290039e9b6a5e92f04bd2f133223506f72d09682c1df16c015172b7a'
 fail() { printf 'connect: %s\n' "$*" >&2; exit 1; }
 note() { if [ -t 1 ] && [ -z "${NO_COLOR+x}" ]; then printf '\033[36m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
@@ -127,17 +127,40 @@ request() {
     api) [ -z "$API_KEY" ] || printf 'X-API-Key: %s\n' "$API_KEY" >> "$header" ;;
     jwt) printf 'Authorization: Bearer %s\n' "$JWT" >> "$header" ;;
     ingest) printf 'Authorization: Bearer %s\n' "$TOKEN" >> "$header" ;;
-    hec) printf 'Authorization: Splunk %s\n' "$TOKEN" >> "$header" ;;
+    hec)
+      [ -n "${HEC_CHANNEL:-}" ] || fail 'Missing private HEC request channel'
+      printf 'Authorization: Splunk %s\nX-Splunk-Request-Channel: %s\n' "$TOKEN" "$HEC_CHANNEL" >> "$header" ;;
   esac
   printf 'Content-Type: application/json\n' >> "$header"
   printf '%s' "$body" > "$WORK/body"
-  HTTP_CODE=$(curl --silent --show-error --connect-timeout 8 --max-time 25 --proto '=http,https' \
+  HTTP_CODE=$(curl --silent --show-error --connect-timeout 8 --max-time "${REQUEST_TIMEOUT:-25}" --proto '=http,https' \
     --request "$method" --header "@$header" --data-binary "@$WORK/body" \
     --output "$WORK/response" --write-out '%{http_code}' "$endpoint" 2> "$WORK/curl-error") || fail 'Request failed (network or TLS); response details withheld'
   RESPONSE=$(cat "$WORK/response")
   case "$HTTP_CODE" in 2??) return 0 ;; *) return 1 ;; esac
 }
-api() { request "$1" "$URL/api/$2" "${3:-}" || fail "API request failed (HTTP $HTTP_CODE); check permissions and server version"; }
+api() {
+  request "$1" "$URL/api/$2" "${3:-}" && return 0
+  if [ "$HTTP_CODE" = 403 ]; then
+    fail "API permission denied: $2 requires log_sources:view for discovery, log_sources:deploy for hosted issuance/revocation, settings:system for open-core tokens; search:execute for verification (and source visibility)"
+  fi
+  fail "API request failed (HTTP $HTTP_CODE); check permissions and server version"
+}
+hec_channel() {
+  local st=$1 value hex
+  safe_id "$st"; private_dir "$STATE/channels"
+  if [ -f "$STATE/channels/$st" ]; then
+    value=$(cat "$STATE/channels/$st")
+  else
+    # Stock Unix entropy; optional openssl is unnecessary. UUID v4 bits.
+    hex=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    [ "${#hex}" = 32 ] || fail 'Cannot obtain HEC channel entropy'
+    value=${hex:0:8}-${hex:8:4}-4${hex:13:3}-a${hex:17:3}-${hex:20:12}
+    printf '%s' "$value" | atomic "$STATE/channels/$st"
+  fi
+  [[ "$value" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || fail 'Invalid stored HEC channel'
+  HEC_CHANNEL=$value
+}
 require_key() {
   if [ -z "$API_KEY" ]; then
     if [ -n "$EMAIL" ]; then
@@ -190,7 +213,39 @@ catalog() {
 }
 # Only enabled bindable sources can receive credentials.
 load_tokens() {
-  api GET ingest-tokens
+  if request GET "$URL/api/ingest-tokens"; then
+    DEPLOYMENT=open-core
+  elif [ "$HTTP_CODE" = 404 ]; then
+    # A 404 alone is not hosted detection: prove the alternate API exists.
+    api GET log-sources/ingest-endpoint
+    get base_url "$RESPONSE" >/dev/null || fail 'Unknown deployment: no hosted ingest endpoint contract'
+    DEPLOYMENT=hosted
+    if [ "$ROTATE" = 1 ] || [ "$COMMAND" = revoke-token ]; then
+      fail 'Hosted rotate/revoke: use Settings → ingest credentials for that source; create and save the replacement before revoking the old credential, then rerun with --token-file'
+    fi
+    : > "$WORK/hosted-credentials"
+    if request GET "$URL/api/log-sources/ingest-credentials"; then
+      printf '%s' "$RESPONSE" | records credentials > "$WORK/hosted-credentials" || fail 'Malformed hosted credential listing'
+    elif [ "$HTTP_CODE" != 403 ]; then
+      fail "Hosted credential discovery failed (HTTP $HTTP_CODE)"
+    else
+      note 'Hosted credential metadata unavailable; log_sources:view and source visibility are needed. Verify fresh request evidence before trusting delivery'
+    fi
+    api GET log-sources
+    printf '%s' "$RESPONSE" | records log_sources > "$WORK/hosted-sources" || fail 'Malformed hosted source listing'
+    : > "$WORK/sources"; : > "$WORK/tokens"
+    local row st sid
+    while IFS= read -r row; do
+      st=$(get source_type "$row" || get name "$row") || fail 'Hosted source lacks source type'
+      sid=$(get id "$row") || fail 'Hosted source lacks id'
+      if [ "$(get enabled "$row" || :)" != false ]; then
+        printf '{"source_id":%s,"route_key":%s,"enabled":true}\n' "$(q "$sid")" "$(q "$st")" >> "$WORK/sources"
+      fi
+    done < "$WORK/hosted-sources"
+    return
+  else
+    fail "Open-core token discovery failed (HTTP $HTTP_CODE); requires settings:system. Hosted discovery requires log_sources:view; issuance requires log_sources:deploy; verification requires search:execute"
+  fi
   LISTING=$RESPONSE
   printf '%s' "$LISTING" | records sources > "$WORK/sources" || fail 'Server lacks source-bound credential API (NAN-3806); upgrade nano'
   printf '%s' "$LISTING" | records tokens > "$WORK/tokens" || fail 'Malformed token listing'
@@ -225,6 +280,37 @@ retire_pending() {
   fi
   rm -f "$pending"
 }
+hosted_credential() {
+  local st=$1 value='' row found=0 protocol
+  [ "$ROTATE" = 0 ] || fail 'Hosted rotation: use Settings → ingest credentials for that source, then rerun with --token-file'
+  if [ -n "$TOKEN_FILE" ]; then
+    if [ -f "$WORK/wanted" ] && [ "$(wc -l < "$WORK/wanted")" -gt 1 ]; then fail '--token-file requires one source; use --token-dir for multiple sources'; fi
+    [ -f "$TOKEN_FILE" ] || fail 'Missing --token-file'
+    value=$(cat "$TOKEN_FILE")
+  elif [ -n "$TOKEN_DIR" ] && [ -f "$TOKEN_DIR/$st" ]; then value=$(cat "$TOKEN_DIR/$st")
+  elif [ -f "$STATE/credentials/$st/hosted-token" ]; then value=$(cat "$STATE/credentials/$st/hosted-token")
+  else value=$(prompt "Hosted source credential for $st: create in Settings → ingest credentials, or pass --token-file" '' 1)
+  fi
+  [[ "$value" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || fail 'Invalid or empty hosted credential'
+  if [ -n "$CREDENTIAL_ID" ]; then
+    protocol=$TRANSPORT; [ "$protocol" != http ] || protocol=nano_https
+    [ "$COMMAND" != otlp-config ] || protocol=otlp_http
+    while IFS= read -r row; do
+      [ "$(get credential_id "$row" || :)" = "$CREDENTIAL_ID" ] || continue
+      [ "$found" = 0 ] || fail 'Ambiguous hosted credential id'
+      found=1
+      if [ "$(get state "$row" || :)" != active ] || [ "$(get kind "$row" || :)" != source ] || [ "$(get protocol "$row" || :)" != "$protocol" ]; then fail 'Hosted credential is inactive, shared, or uses another protocol'; fi
+      # Known contract: source credentials have exactly one ASCII source slug.
+      printf '%s' "$row" | grep -Eq '"source_slugs"[[:space:]]*:[[:space:]]*\[[[:space:]]*"'"$st"'"[[:space:]]*\]' || fail 'Hosted credential belongs to another source'
+    done < "$WORK/hosted-credentials"
+    [ "$found" = 1 ] || fail 'Hosted credential id not readable; check log_sources:view and source visibility'
+    note 'Hosted credential metadata matches requested source/protocol; token possession and binding require fresh connectivity evidence'
+  else
+    note 'Hosted listing has no token fingerprint; use --credential-id for metadata checks and connect/verify for actual token binding proof'
+  fi
+  printf '%s' "$value" | atomic "$STATE/credentials/$st/hosted-token"
+  TOKEN=$value; persist_artifact_token "$st"
+}
 find_credential() {
   local row value found=
   while IFS= read -r row; do
@@ -237,9 +323,12 @@ find_credential() {
 credential() {
   local st=$1 sid row='' old='' cid='' value='' prefix state
   safe_id "$st"
+  hec_channel "$st"
   sid=$(source_id "$st") || fail "No enabled bindable source for $st; deploy its parser first"
   safe_id "$sid"
   private_dir "$STATE/credentials"; private_dir "$STATE/credentials/$st"
+  if [ "$DEPLOYMENT" = hosted ]; then hosted_credential "$st"; return; fi
+  [ -z "$TOKEN_FILE" ] || fail 'Open-core uses --token-dir with one named credential per source'
   local store=$STATE/credentials/$st/current
   if [ -n "$TOKEN_DIR" ] && [ -f "$TOKEN_DIR/$st" ]; then
     [ "$ROTATE" = 0 ] || fail 'To rotate a managed credential, omit --token-dir'
@@ -675,7 +764,55 @@ search() {
   end=$(date -u -d "@$((now + 60))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "$((now + 60))" '+%Y-%m-%dT%H:%M:%SZ')
   request POST "$SEARCH_URL" "{\"query\":$(q "$query"),\"time_range\":{\"start\":$(q "$start"),\"end\":$(q "$end")},\"limit\":100,\"offset\":0,\"skip_histogram\":true,\"skip_field_stats\":true,\"async_mode\":false}" || fail "Search failed (HTTP $HTTP_CODE)"
 }
+verify_evidence() {
+  [ -f "$EVIDENCE_FILE" ] || fail 'Missing --evidence-file'
+  local st marker extra start deadline remaining found row stored
+  : > "$WORK/evidence"
+  while read -r st marker extra || [ -n "$st" ]; do
+    [ -n "$st" ] || continue
+    safe_id "$st"
+    [[ "$marker" =~ ^[A-Za-z0-9_-]{8,128}$ ]] || fail 'Evidence markers must be 8-128 ASCII letters, digits, underscores or hyphens'
+    [ -z "$extra" ] || fail 'Evidence format: source marker (one request per line)'
+    if awk -v m="$marker" '$2==m {found=1} END {exit !found}' "$WORK/evidence"; then fail 'Every evidence request needs a distinct marker'; fi
+    printf '%s %s\n' "$st" "$marker" >> "$WORK/evidence"
+  done < "$EVIDENCE_FILE"
+  [ -s "$WORK/evidence" ] || fail 'Evidence file is empty'
+  start=$(date +%s); deadline=$((start + WAIT_SECONDS))
+  while :; do
+    : > "$WORK/pending"
+    while read -r st marker; do
+      remaining=$((deadline - $(date +%s)))
+      if [ "$WAIT_SECONDS" -gt 0 ] && [ "$remaining" -le 0 ]; then
+        printf '%s %s\n' "$st" "$marker" >> "$WORK/pending"; continue
+      fi
+      REQUEST_TIMEOUT=25
+      if [ "$WAIT_SECONDS" -gt 0 ] && [ "$remaining" -lt 25 ]; then REQUEST_TIMEOUT=$remaining; fi
+      # Filter at the server so a busy source cannot hide evidence beyond 100 rows.
+      search "metadata.log_source=\"$st\" AND \"$marker\""
+      printf '%s' "$RESPONSE" | records results > "$WORK/evidence-results" || fail 'Malformed search evidence response'
+      found=0
+      while IFS= read -r row; do
+        # Require canonical stored source evidence, never the claimed sourcetype.
+        stored=$(get metadata.log_source "$row" || :)
+        if [ -z "$stored" ]; then
+          stored=$(printf '%s' "$row" | sed -n 's/.*"metadata"[[:space:]]*:[[:space:]]*{[^}]*"log_source"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p')
+        fi
+        if [ "$stored" = "$st" ] && printf '%s' "$row" | grep -Fq "$marker"; then found=1; break; fi
+      done < "$WORK/evidence-results"
+      if [ "$found" = 1 ]; then note "Evidence searchable under token source $st: $marker"
+      else printf '%s %s\n' "$st" "$marker" >> "$WORK/pending"; fi
+    done < "$WORK/evidence"
+    REQUEST_TIMEOUT=25
+    [ -s "$WORK/pending" ] || { note 'All request markers searchable under their token sources'; return; }
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      while read -r st marker; do note "Missing evidence under token source $st: $marker"; done < "$WORK/pending"
+      fail "Delivery evidence incomplete within $WAIT_SECONDS seconds"
+    fi
+    cp "$WORK/pending" "$WORK/evidence"; sleep 1
+  done
+}
 verify() {
+  if [ -n "$EVIDENCE_FILE" ]; then verify_evidence; return; fi
   [ -n "$SOURCE" ] || SOURCE=$(prompt 'Source type (--source)' '')
   safe_id "$SOURCE"; search "source_type=\"$SOURCE\""
   printf '%s' "$RESPONSE" | records results > "$WORK/results" || fail 'Malformed search response'
@@ -695,10 +832,13 @@ verify() {
   [ "$count" -gt 0 ] || return 1
 }
 connect_flow() {
-  api GET setup/status
-  [ "$(get initialized "$RESPONSE")" = true ] || fail 'Complete initial server setup first'
   [ -n "$SOURCE" ] || SOURCE=$(prompt 'Existing source for connectivity test (--source)' '')
-  safe_id "$SOURCE"; load_tokens; credential "$SOURCE"
+  safe_id "$SOURCE"; load_tokens
+  if [ "$DEPLOYMENT" != hosted ]; then
+    api GET setup/status
+    [ "$(get initialized "$RESPONSE")" = true ] || fail 'Complete initial server setup first'
+  fi
+  credential "$SOURCE"
   local marker n=0
   marker=nano-connect-$(date +%s)-$$-$RANDOM
   if [ "$TRANSPORT" = hec ]; then
@@ -707,7 +847,7 @@ connect_flow() {
     request POST "$INGEST_URL" "{\"message\":$(q "nano-connect connectivity test $marker")}" ingest || fail "Ingest rejected (HTTP $HTTP_CODE)"
   fi
   while [ "$n" -lt 23 ]; do
-    search "source_type=\"$SOURCE\""
+    search "metadata.log_source=\"$SOURCE\" AND \"$marker\""
     if printf '%s' "$RESPONSE" | records results | grep -Fq "$marker"; then note 'Connectivity event searchable; connection saved'; return; fi
     n=$((n+1)); sleep 2
   done
@@ -747,6 +887,8 @@ Usage: bash connect.sh [connect|add-source|add-agent|add-aggregator|list-sources
   --transport hec|http (default hec; direct native nano uplink refused)
   --ingest-url URL / NANO_INGEST_URL     --search-url URL / NANO_SEARCH_URL
   --source TYPE / NANO_SOURCE           --sources a,b:tcp / NANO_SOURCES
+  --token-file FILE / NANO_TOKEN_FILE (hosted single-source credential)
+  --credential-id ID / NANO_CREDENTIAL_ID (optional hosted metadata check)
   --token-dir DIR / NANO_TOKEN_DIR (one named source credential per file)
   --rotate (persist replacement before revocation)
   --os linux|windows / NANO_OS          --target HOST:PORT (trusted aggregator)
@@ -756,6 +898,8 @@ Usage: bash connect.sh [connect|add-source|add-agent|add-aggregator|list-sources
   --run (docker compose deployment)     --window MINUTES (15)
   --add-official                        --builtin-only
   --yes / NANO_YES=1                    --non-interactive / NANO_NON_INTERACTIVE=1
+  --evidence-file FILE / NANO_EVIDENCE_FILE (source marker pairs; verify)
+  --wait-seconds SECONDS / NANO_WAIT_SECONDS (120; evidence deadline)
   --version                            --help
 Secrets are never shown. Prefer env variables/private files over secret flags.
 OTLP exporters: use source-bound Bearer credentials at /otlp/v1/{logs,metrics,traces}
@@ -768,27 +912,29 @@ main() {
   URL=${NANO_URL:-}; API_KEY=${NANO_API_KEY:-}; EMAIL=${NANO_EMAIL:-}; PASSWORD=${NANO_PASSWORD:-}; JWT=
   INGEST_URL=${NANO_INGEST_URL:-}; SEARCH_URL=${NANO_SEARCH_URL:-}; ENV_FILE=
   SOURCE=${NANO_SOURCE:-}; SOURCES=${NANO_SOURCES:-}; OUT=${NANO_OUT_DIR:-}; OS=${NANO_OS:-}; TARGET=${NANO_TARGET:-}
-  TRANSPORT=${NANO_TRANSPORT:-hec}; TOKEN_DIR=${NANO_TOKEN_DIR:-}; ROTATE=0; RUN=0; JOURNALD=1; FILES=; FILE_SOURCE=application
+  TRANSPORT=${NANO_TRANSPORT:-hec}; TOKEN_DIR=${NANO_TOKEN_DIR:-}; TOKEN_FILE=${NANO_TOKEN_FILE:-}; CREDENTIAL_ID=${NANO_CREDENTIAL_ID:-}; DEPLOYMENT=; ROTATE=0; RUN=0; JOURNALD=1; FILES=; FILE_SOURCE=application
   OTLP_READY=${NANO_OTLP_SOURCE_AUTH_RELEASED:-0}; AGENT_PORT=9000; WINDOW=15; DEPLOY_PARSERS=0; NATIVE_INPUT=tag; ADD_OFFICIAL=0; BUILTIN=0; YES=${NANO_YES:-0}; NONINTERACTIVE=${NANO_NON_INTERACTIVE:-0}
   CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/nano-connect-bash
-  COMMAND=connect; UPSTREAM=tag; TOKEN=;
+  COMMAND=connect; UPSTREAM=tag; TOKEN=; HEC_CHANNEL=
+  EVIDENCE_FILE=${NANO_EVIDENCE_FILE:-}; WAIT_SECONDS=${NANO_WAIT_SECONDS:-120}
   [ -t 0 ] || NONINTERACTIVE=1
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      connect|add-source|add-agent|add-aggregator|list-sources|list-devices|sync-parsers|verify|rotate-token|otlp-config) COMMAND=$1; shift ;;
+      connect|add-source|add-agent|add-aggregator|list-sources|list-devices|sync-parsers|verify|rotate-token|revoke-token|otlp-config) COMMAND=$1; shift ;;
       --help|-h) help_text; return ;; --version|-v) printf '%s\n' "$VERSION"; return ;;
       --yes) YES=1; NONINTERACTIVE=1; shift ;; --non-interactive) NONINTERACTIVE=1; shift ;;
       --run) RUN=1; shift ;; --rotate) ROTATE=1; shift ;; --no-journald) JOURNALD=0; shift ;;
       --add-official) ADD_OFFICIAL=1; shift ;; --builtin-only) BUILTIN=1; shift ;;
       --to-nano) TARGET=; shift ;;
-      --url|--api-key|--email|--password|--env-file|--ingest-url|--search-url|--source|--sources|--devices|--out-dir|--os|--target|--transport|--token-dir|--files|--file-source|--agent-port|--window)
+      --url|--api-key|--email|--password|--env-file|--ingest-url|--search-url|--source|--sources|--devices|--out-dir|--os|--target|--transport|--token-dir|--token-file|--credential-id|--files|--file-source|--agent-port|--window|--evidence-file|--wait-seconds)
         [ "$#" -ge 2 ] || fail 'Flag requires a value'
         case "$1" in
           --url) URL=$2 ;; --api-key) API_KEY=$2 ;; --email) EMAIL=$2 ;; --password) PASSWORD=$2 ;; --env-file) ENV_FILE=$2 ;;
           --ingest-url) INGEST_URL=$2 ;; --search-url) SEARCH_URL=$2 ;; --source) SOURCE=$2 ;;
           --sources|--devices) SOURCES=$2 ;; --out-dir) OUT=$2 ;; --os) OS=$2 ;; --target) TARGET=$2 ;;
-          --transport) TRANSPORT=$2 ;; --token-dir) TOKEN_DIR=$2 ;; --files) FILES=$2 ;; --file-source) FILE_SOURCE=$2 ;;
+          --token-file) TOKEN_FILE=$2 ;; --credential-id) CREDENTIAL_ID=$2 ;; --transport) TRANSPORT=$2 ;; --token-dir) TOKEN_DIR=$2 ;; --files) FILES=$2 ;; --file-source) FILE_SOURCE=$2 ;;
           --agent-port) AGENT_PORT=$2 ;; --window) WINDOW=$2 ;;
+          --evidence-file) EVIDENCE_FILE=$2 ;; --wait-seconds) WAIT_SECONDS=$2 ;;
         esac; shift 2 ;;
       --ingest-token) fail 'Shared ingest token removed; use --token-dir with one bound credential per source' ;;
       --mtls-dir|--vector-host|--vector-port) fail 'Direct native nano uplink bypasses source credentials; use HEC/HTTP' ;;
@@ -797,6 +943,8 @@ main() {
     esac
   done
   case "$TRANSPORT" in hec|http) ;; *) fail 'Use hec or http; native nano uplink bypasses source-bound credentials' ;; esac
+  if ! [[ "$WAIT_SECONDS" =~ ^[0-9]{1,3}$ ]] || [ "$WAIT_SECONDS" -gt 120 ]; then fail 'Evidence deadline must be 0-120 seconds'; fi
+  WAIT_SECONDS=$((10#$WAIT_SECONDS))
   safe_id "$FILE_SOURCE"
   port_check "$AGENT_PORT"
   if ! [[ "$WINDOW" =~ ^[0-9]{1,4}$ ]] || [ "$WINDOW" -le 0 ]; then fail 'Invalid search window'; fi
@@ -825,6 +973,10 @@ main() {
       printf '%s' "$TOKEN" | atomic "$OUT/secrets/$SOURCE"
       { printf 'OTEL_EXPORTER_OTLP_ENDPOINT=%s/otlp\n' "$URL"; printf 'OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\n'; printf "OTEL_EXPORTER_OTLP_HEADERS='Authorization=Bearer %s'\n" "$TOKEN"; } | atomic "$OUT/otel.env"
       note 'Private OTLP exporter environment generated. Each source needs its own exporter and bound credential; the server enforces revocation per request'
+      ;;
+    revoke-token)
+      load_tokens
+      fail 'Open-core revocation uses the credential API; hosted revocation uses Settings → ingest credentials for that source'
       ;;
     rotate-token)
       [ -n "$SOURCE" ] || fail 'Pass --source'

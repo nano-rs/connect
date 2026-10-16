@@ -53,6 +53,79 @@ Profiles and credentials are isolated per instance in
 Legacy npm profiles and install `.env` secrets are deliberately not imported.
 `--env-file` reads only `BASE_URL` and never executes file content.
 
+Open-core credential management requires `settings:system`. Hosted discovery
+requires `log_sources:view`; hosted request/reveal/revoke requires
+`log_sources:deploy`; verification requires `search:execute`. The key and its
+owning user also need visibility of the selected sources. Parser import/publish
+requires the parser and source permissions named by those APIs. A search-only key
+cannot provision credentials.
+
+**Hosted: create the source credential in the UI, then run the client.** In
+Settings → ingest credentials for that source, create a **source** credential
+for HEC (or HTTP), save its revealed value in a private 0600 file, then run:
+
+```bash
+bash connect.sh add-source --sources cisco_asa --token-file /private/cisco-token --ingest-url https://tenant.ingest.nano.rs --non-interactive
+bash connect.sh connect --source cisco_asa --token-file /private/cisco-token --ingest-url https://tenant.ingest.nano.rs --non-interactive
+```
+
+Supply `NANO_API_KEY` privately with `log_sources:view`, `search:execute` and
+visibility of the source. UI issuance/revocation additionally needs
+`log_sources:deploy`. A search-only key cannot discover sources. A hidden prompt
+is available interactively instead of `--token-file`; automation can set
+`NANO_TOKEN_FILE`. Tokens are saved privately per profile/source and reused.
+For multiple sources use `--token-dir` with a separate file per canonical source.
+Pass the correct explicit ingest endpoint; discovery never guesses a token destination.
+
+`--credential-id ID` (`NANO_CREDENTIAL_ID`) optionally checks the hosted listing
+for active state, source kind, exact single-source binding and transport. The
+listing has no token fingerprint, so metadata cannot authenticate the supplied
+secret. Without an ID the client explicitly reports that limitation; when metadata
+access is denied it still permits import. Run `connect` with fresh evidence to
+prove actual token possession/routing, and use collector evidence below before
+claiming delivery. Rendering alone proves neither. Wrong IDs/bindings and shared
+collector credentials are rejected when an ID is provided.
+
+Hosted automatic issuance is intentionally delegated to the UI: its one-time
+ECDH/HKDF/AES-GCM reveal is designed for the browser. No crypto dependency or
+server-contract change is introduced. Hosted `rotate-token`, `--rotate` and
+`revoke-token` print the UI path. Save the replacement privately and regenerate/
+reload the collector before revoking the old credential in the UI. Open core
+retains automatic create/reuse/rotate. Live hosted b12 acceptance remains the
+coordinator's responsibility.
+
+A source credential decides where an event is stored. Sending source B's claimed
+HEC sourcetype or HTTP path with source A's credential is accepted under **A**;
+the claim cannot override the binding. Revoked tokens are refused. A supplied
+credential for the wrong requested source is rejected locally before sending.
+
+HEC connectivity requests include a private UUID v4 channel, persisted as a 0600
+file per profile/source under `channels/`. It survives reruns and rotations.
+Vector 0.59's HEC sink generates its own UUID channel and includes it on event
+and acknowledgement requests; its supported config has no channel override.
+
+For collector delivery proof, send a different marker in **each actual request**
+through the collector's listeners, then record the expected token source and
+marker in a file (one `source marker` pair per line):
+
+```text
+cisco_asa proof-cisco-request-001
+palo_alto proof-palo-request-002
+```
+
+```bash
+bash connect.sh verify --evidence-file /private/request-evidence.txt --wait-seconds 120
+```
+
+Markers must be distinct, 8–128 ASCII letters/digits/underscores/hyphens. Verification
+searches each marker with `metadata.log_source`, checks the returned canonical
+stored source, remembers successful requests, and polls only missing ones within
+one shared deadline. `--wait-seconds 0` takes one snapshot. A partial result exits
+nonzero and names missing evidence. This command sends no events: direct API
+connectivity cannot prove collector delivery. Start verification immediately after
+sending; the verifier's deadline starts when polling starts, so the coordinator
+must also record send times for the end-to-end two-minute acceptance.
+
 Token directories are 0700 and token files 0600. Collector configs use Vector's
 secret directory backend; no tokens appear in TOML or terminal output. Windows
 installer artifacts restrict the secret directory ACL to Administrators and SYSTEM.
@@ -252,8 +325,9 @@ is no flag to turn it off.
 port can also write to it. Use it on a trusted network or VPN — or use `--transport http`, which
 authenticates every request with your ingest token.
 
-**HTTP fans out per source_type.** nano routes on the `X-Source-Type` *request header*, not on any
-`source_type` field in the body, and Vector's http sink headers are static per sink. So each
+**HTTP fans out per source_type.** Current source credentials determine the stored source;
+claimed headers or body fields cannot override that binding. The retained npm renderer uses
+static per-sink headers, while the Bash client uses one bound token per sink. So each
 device type gets its own `[sinks.nano_<source_type>]` block. Add a device → add a sink. On the
 aggregator, agent source types outside the known set land in `agent_route._unmatched` and are
 **dropped** rather than mislabeled (Vector reports this as a config warning, by design).

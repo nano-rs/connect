@@ -76,3 +76,19 @@ shared-token sink would violate the new credential contract.
   generated configuration implements its public HTTP/protobuf/Bearer contract,
   gated by NANO_OTLP_SOURCE_AUTH_RELEASED=1; it never contacts the internal nginx
   auth endpoint or exposes raw OTLP ports. Live proof waits for that release.
+
+## Live-proof follow-up (0.4.1)
+
+| Requirement | Implementation | Offline proof / limit |
+|---|---|---|
+| HEC request channel | `hec_channel`, `request`: private UUID persisted per instance/source | Header required by mock; stable across processes; independent between sources. Vector already generates channels in its HEC service. |
+| Hosted discovery/scopes | `load_tokens`, `api`: probe alternate hosted endpoint and credential list after open-core 404 | Hosted and missing-scope fixtures; UI-issued source credentials imported via `--token-file`, hidden prompt or per-source directory; optional ID metadata validation. No hosted issuance/revoke API mutation. |
+| Token-authoritative routing | Server stores requests under token source, regardless of source claims | Mock accepts B claim with A token, then evidence passes only under A. Local wrong-source credential validation stays strict. |
+| Per-request collector evidence | `verify_evidence`: distinct markers, canonical stored source, shared deadline ≤120s | Complete/partial/wrong source, distinct markers, delayed second source, no final newline, timeout cases. Coordinator must send through real collector and record send times. |
+
+Hosted issuance/rotation/revocation intentionally uses Settings → ingest credentials
+for that source (coordinator decision). `hosted_credential` imports and privately
+persists user-created source tokens; optional credential ID checks kind, source,
+state and protocol. The list has no fingerprint, so fresh canonical connectivity
+evidence proves secret binding. Offline import/reuse, denied metadata, mismatched
+metadata, HTTP/HEC, multi-source file refusal and UI lifecycle guidance are tested.
