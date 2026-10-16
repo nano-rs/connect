@@ -1,3 +1,37 @@
+# NAN-3942 0.4.2 — hosted UI credential import
+
+The latest coordinator decision is implemented: hosted source credentials are
+created/revealed in Settings → ingest credentials for that source and supplied
+with `--token-file`/NANO_TOKEN_FILE, hidden input, or a per-source token directory.
+They are stored 0600 in 0700 profile directories, reused and rendered through the
+existing secret backend. No hosted issuance/reveal/revoke mutation or crypto
+runtime was added. Hosted rotate/revoke print UI guidance; open-core automatic
+lifecycle remains intact.
+
+Optional --credential-id validates readable hosted metadata: active, source kind,
+exact single-source allowlist, matching protocol. The listing has no fingerprint;
+metadata alone cannot link the secret to the ID. Fresh connect searches require
+canonical metadata.log_source and the request marker; collector delivery still
+requires distinct per-request evidence. Missing metadata access is explicit,
+never a fabricated validation claim. README documents scopes and examples.
+
+Validation: 91 offline CLI checks pass on Bash 5.3.15 and actual Bash 3.2.57;
+JSON/path/hash units pass on both, plus Bash POSIX units, shellcheck, syntax/static
+portability, checksum and whitespace checks. Existing TS goldens run in the suite;
+Vector rendering is unchanged, so prior pinned-image validation applies. No Docker
+was run on the host in this follow-up.
+
+Tests add hosted import/reuse, HEC/HTTP connectivity, denied metadata, optional ID,
+wrong source/protocol/kind/state, unknown ID, multi-source single-file rejection,
+and rotate/revoke UI guidance with no hosted credential mutation.
+
+Live CT108/hosted b12, two-source collector deadline, Windows and OTLP release
+acceptance remain coordinator work. No release or npm deprecation is authorized
+by offline checks. Earlier reports below describe historical blockers superseded
+by this explicit UI-import decision.
+
+---
+
 # NAN-3942 live-proof follow-up — BLOCKED on hosted lifecycle
 
 The 0.4.1 follow-up fixes the missing HEC channel and adds per-request delivery

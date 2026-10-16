@@ -18,7 +18,7 @@ elif os.getenv('MOCK_HOSTED') and path=='ingest-tokens': status=404
 elif os.getenv('MOCK_HOSTED') and path=='log-sources/ingest-endpoint':
     status=403 if os.getenv('MOCK_HOSTED_DENIED') else 200
     result={'base_url':'https://tenant.ingest.nano.test'}
-elif os.getenv('MOCK_HOSTED') and path=='log-sources/ingest-credentials': result={'credentials':[], 'requests':[]}
+elif os.getenv('MOCK_HOSTED') and path=='log-sources/ingest-credentials': result={'credentials':json.loads(os.getenv('MOCK_HOSTED_CREDENTIALS','[]')), 'requests':[]}; status=403 if os.getenv('MOCK_METADATA_DENIED') else 200
 elif path=='setup/status': result={'initialized':True}
 elif path=='ingest-tokens' and method=='GET':
     result={'tokens':s['tokens'],'sources':sources}

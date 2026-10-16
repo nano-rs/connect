@@ -60,17 +60,39 @@ owning user also need visibility of the selected sources. Parser import/publish
 requires the parser and source permissions named by those APIs. A search-only key
 cannot provision credentials.
 
-**Hosted automatic provisioning is currently blocked.** A 404 from
-`/api/ingest-tokens` triggers discovery through `/api/log-sources/ingest-endpoint`
-and `/api/log-sources/ingest-credentials`. Hosted issuance is a separate
-request → poll → one-time reveal contract, using a public reveal key and an
-ECDH/HKDF/AES-GCM envelope. It never returns an open-core plaintext `nit_` token.
-This Bash client diagnoses that contract and stops before issuance or revocation;
-it does not yet implement the envelope opener. Stock `openssl enc` cannot decrypt
-AEAD envelopes. Ludus #6 accepts pre-issued hosted source tokens; it does not
-implement this issuance flow either. Hosted create/reuse/rotate CLI parity and the
-hosted b12 acceptance run remain release blockers. Do not treat `--token-dir` as
-a hosted bypass: it currently validates against the open-core token API.
+**Hosted: create the source credential in the UI, then run the client.** In
+Settings → ingest credentials for that source, create a **source** credential
+for HEC (or HTTP), save its revealed value in a private 0600 file, then run:
+
+```bash
+bash connect.sh add-source --sources cisco_asa --token-file /private/cisco-token --ingest-url https://tenant.ingest.nano.rs --non-interactive
+bash connect.sh connect --source cisco_asa --token-file /private/cisco-token --ingest-url https://tenant.ingest.nano.rs --non-interactive
+```
+
+Supply `NANO_API_KEY` privately with `log_sources:view`, `search:execute` and
+visibility of the source. UI issuance/revocation additionally needs
+`log_sources:deploy`. A search-only key cannot discover sources. A hidden prompt
+is available interactively instead of `--token-file`; automation can set
+`NANO_TOKEN_FILE`. Tokens are saved privately per profile/source and reused.
+For multiple sources use `--token-dir` with a separate file per canonical source.
+Pass the correct explicit ingest endpoint; discovery never guesses a token destination.
+
+`--credential-id ID` (`NANO_CREDENTIAL_ID`) optionally checks the hosted listing
+for active state, source kind, exact single-source binding and transport. The
+listing has no token fingerprint, so metadata cannot authenticate the supplied
+secret. Without an ID the client explicitly reports that limitation; when metadata
+access is denied it still permits import. Run `connect` with fresh evidence to
+prove actual token possession/routing, and use collector evidence below before
+claiming delivery. Rendering alone proves neither. Wrong IDs/bindings and shared
+collector credentials are rejected when an ID is provided.
+
+Hosted automatic issuance is intentionally delegated to the UI: its one-time
+ECDH/HKDF/AES-GCM reveal is designed for the browser. No crypto dependency or
+server-contract change is introduced. Hosted `rotate-token`, `--rotate` and
+`revoke-token` print the UI path. Save the replacement privately and regenerate/
+reload the collector before revoking the old credential in the UI. Open core
+retains automatic create/reuse/rotate. Live hosted b12 acceptance remains the
+coordinator's responsibility.
 
 A source credential decides where an event is stored. Sending source B's claimed
 HEC sourcetype or HTTP path with source A's credential is accepted under **A**;

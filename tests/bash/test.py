@@ -103,10 +103,28 @@ with tempfile.TemporaryDirectory(prefix='connect-tests-') as td:
     evidence.write_text('palo_alto authoritative-routing-marker\n')
     run('verify','--evidence-file',str(evidence),'--wait-seconds','0',ok=False)
     p=run('add-source','--sources','cisco_asa',extra={'MOCK_HOSTED':'1'},ok=False)
-    assert 'sealed tokens' in p.stderr and 'log_sources:deploy' in p.stderr
+    assert 'Settings' in p.stderr and '--token-file' in p.stderr
     assert ['GET','log-sources/ingest-credentials'] in state()['calls']
     p=run('add-source','--sources','cisco_asa',extra={'MOCK_HOSTED':'1','MOCK_HOSTED_DENIED':'1'},ok=False)
     assert 'log_sources:view' in p.stderr
+
+    hosted_token=tmp/'hosted-token';hosted_token.write_text(token)
+    hosted={'MOCK_HOSTED':'1'}
+    run('add-source','--sources','cisco_asa','--token-file',str(hosted_token),extra=hosted)
+    assert stat.S_IMODE(next((home/'config').glob('nano-connect-bash/*/credentials/cisco_asa/hosted-token')).stat().st_mode)==0o600
+    run('connect','--source','cisco_asa','--token-file',str(hosted_token),extra=hosted)
+    run('connect','--source','cisco_asa','--transport','http',extra=hosted)
+    run('add-source','--sources','cisco_asa',extra=dict(hosted,MOCK_METADATA_DENIED='1'))
+    metadata={'credential_id':'hosted-1','kind':'source','state':'active','protocol':'hec','source_slugs':['cisco_asa']}
+    hm=dict(hosted,MOCK_HOSTED_CREDENTIALS=json.dumps([metadata]))
+    run('add-source','--sources','cisco_asa','--credential-id','hosted-1',extra=hm)
+    for key,value in [('state','revoked'),('kind','collector'),('protocol','nano_https'),('source_slugs',['palo_alto'])]:
+        run('add-source','--sources','cisco_asa','--credential-id','hosted-1',extra=dict(hosted,MOCK_HOSTED_CREDENTIALS=json.dumps([dict(metadata,**{key:value})])),ok=False)
+    run('add-source','--sources','cisco_asa','--credential-id','unknown',extra=hm,ok=False)
+    run('add-source','--sources','cisco_asa,palo_alto','--token-file',str(hosted_token),extra=hosted,ok=False)
+    for args in [('rotate-token','--source','cisco_asa','--out-dir',str(tmp/'out')),('revoke-token','--source','cisco_asa'),('add-source','--sources','cisco_asa','--rotate')]:
+        p=run(*args,extra=hosted,ok=False);assert 'Settings' in p.stderr
+    assert not any(method=='POST' and path.startswith('log-sources/ingest-credentials') for method,path in state()['calls'])
 
     run('add-source','--sources','x"\n[sinks.evil]',ok=False)
     run('add-source','--transport','native',ok=False)
