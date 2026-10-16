@@ -1,0 +1,44 @@
+name: Bash client
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsx tests/bash/golden.ts && git diff --exit-code -- tests/bash/fixtures
+      - run: bash tests/bash/check.sh
+      - run: VECTOR_VALIDATE=1 python3 tests/bash/test.py
+      - name: Full Bash 3.2 offline suite
+        run: python3 tests/bash/bash32.py
+      - run: sha256sum --check connect.sh.sha256
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify version and publish standalone assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "v$(bash connect.sh --version)" = "$RELEASE_TAG"
+          sha256sum --check connect.sh.sha256
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --generate-notes
+          gh release upload "$RELEASE_TAG" connect.sh connect.sh.sha256 --clobber
