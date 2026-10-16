@@ -85,7 +85,9 @@ quote() {
 q() { printf '%s' "$1" | quote; }
 get() { printf '%s' "$2" | field "$1"; }
 safe_id() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || fail 'Invalid source identifier'; }
-port_check() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && [ "$1" -gt 0 ] && [ "$1" -le 65535 ] || fail 'Invalid port'; }
+port_check() {
+  if ! [[ "$1" =~ ^[0-9]{1,5}$ ]] || [ "$1" -le 0 ] || [ "$1" -gt 65535 ]; then fail 'Invalid port'; fi
+}
 url_check() {
   case "$1" in http://*|https://*) ;; *) fail 'URL must use http:// or https://' ;; esac
   local authority=${1#*://}
@@ -103,7 +105,7 @@ atomic() {
 }
 prompt() {
   local label=$1 default=${2:-} secret=${3:-0} answer
-  [ "$NONINTERACTIVE" = 0 ] && [ -t 0 ] || fail "Missing required value: $label"
+  if [ "$NONINTERACTIVE" != 0 ] || [ ! -t 0 ]; then fail "Missing required value: $label"; fi
   printf '%s [%s]: ' "$label" "$default" >&2
   if [ "$secret" = 1 ]; then read -r -s answer || fail 'Input ended'; printf '\n' >&2; else read -r answer || fail 'Input ended'; fi
   printf '%s' "${answer:-$default}"
@@ -251,7 +253,7 @@ credential() {
       api POST "ingest-tokens/$cid/bind" "{\"source_id\":$(q "$sid")}"; load_tokens
       row=$(find_credential credential_id "$cid") || fail 'Bound credential not found'
     fi
-    [ "$(get state "$row")" = active ] && [ "$(get source_id "$row")" = "$sid" ] || fail 'Supplied token belongs to another source or is inactive'
+    if [ "$(get state "$row")" != active ] || [ "$(get source_id "$row")" != "$sid" ]; then fail 'Supplied token belongs to another source or is inactive'; fi
   elif [ -f "$store" ]; then
     { IFS= read -r cid; IFS= read -r value; } < "$store"
     safe_id "$cid"
@@ -274,7 +276,7 @@ credential() {
     [ -n "$cid" ] || fail 'Create response missing credential id'
     safe_id "$cid"; load_tokens
     row=$(find_credential credential_id "$cid") || fail 'Issued credential absent from listing'
-    [ "$(get state "$row")" = active ] && [ "$(get source_id "$row" || :)" = "$sid" ] || fail 'Issued credential not active or bound correctly'
+    if [ "$(get state "$row")" != active ] || [ "$(get source_id "$row" || :)" != "$sid" ]; then fail 'Issued credential not active or bound correctly'; fi
   fi
   [[ "$value" =~ ^nit_[A-Za-z0-9_-]+$ ]] || fail 'Invalid credential token'
   # One atomic record contains both id and secret; no split-state rotation window.
@@ -797,7 +799,7 @@ main() {
   case "$TRANSPORT" in hec|http) ;; *) fail 'Use hec or http; native nano uplink bypasses source-bound credentials' ;; esac
   safe_id "$FILE_SOURCE"
   port_check "$AGENT_PORT"
-  [[ "$WINDOW" =~ ^[0-9]{1,4}$ ]] && [ "$WINDOW" -gt 0 ] || fail 'Invalid search window'
+  if ! [[ "$WINDOW" =~ ^[0-9]{1,4}$ ]] || [ "$WINDOW" -le 0 ]; then fail 'Invalid search window'; fi
   if [ "$COMMAND" = list-devices ]; then COMMAND=list-sources; fi
   if [ "$COMMAND" = list-sources ] && [ "$BUILTIN" = 1 ]; then catalog; return; fi
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/nano-connect.XXXXXXXX")
