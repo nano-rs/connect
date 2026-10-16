@@ -1,3 +1,78 @@
+# NAN-3942 live-proof follow-up — BLOCKED on hosted lifecycle
+
+The 0.4.1 follow-up fixes the missing HEC channel and adds per-request delivery
+evidence. Hosted detection/scopes are implemented; hosted automatic credential
+issuance/reuse/rotation is **not complete**, so this is not release-ready.
+
+- HEC curl requests now require a UUID v4 channel, private and stable per
+  profile/source. Vector's existing HEC sink already generates a channel in
+  `src/sinks/splunk_hec/common/service.rs` and uses it for event/ack requests;
+  no unsupported Vector config option was added.
+- `verify --evidence-file FILE --wait-seconds 120` checks distinct markers from
+  actual collector requests under `metadata.log_source`, remembers successes,
+  and shares a deadline across sources. A partial result fails. Snapshot mode
+  is `--wait-seconds 0`. The coordinator must record send times separately;
+  the deadline here measures polling time, not time since external sends.
+- Mock routing now stores claimed-source-B requests with token A under A.
+  Wrong-source imports still fail locally. Server refusal is expected for revoked
+  tokens, not for a claim that the server overrides with the token binding.
+- Open-core 404 triggers hosted endpoint/credential discovery rather than an
+  unconditional open-core prerequisite. Denials name `log_sources:view`,
+  `log_sources:deploy`, `search:execute`, open-core `settings:system`, and source
+  visibility. Hosted detection stops before requesting or revoking anything.
+
+## Hosted blocker and evidence
+
+Read the hosted handlers and core types in local nanosiem `lean-lake-merge`:
+`nanosiem-enterprise/src/handlers/enterprise_shared_sources.rs` (request, poll,
+reveal, revoke) and `nanosiem-core/src/enterprise_shared_sources.rs` (endpoint).
+Read nano-main origin/main's `packages/shared/src/crypto/ingest-credential-envelope.ts`,
+`apps/api/src/services/shared-infrastructure/ingest-credential-seal.ts`, and
+`apps/api/src/services/hosted-shared-ingest-credentials.ts`. The org-facing
+nano-main service can return plaintext to its separately authenticated org API;
+it is not the tenant SIEM API or authenticated by its `NANO_API_KEY`.
+
+Tenant API contract:
+`POST /api/log-sources/ingest-credentials` takes `kind: source`, one `source_slugs`
+entry, `protocol: hec|nano_https|otlp_http`, `reveal_public_key`, and reveal-key
+algorithm. Poll `GET .../requests/{id}`, then `POST .../requests/{id}/reveal` once.
+The revealed token is an X25519/P-256 ECDH + HKDF-SHA256 + AES-256-GCM envelope,
+AAD request UUID concatenated with tenant UUID. The API does not return plaintext.
+Stock `openssl enc` does not support AEAD/GCM; optional openssl alone does not
+supply the required authenticated opener. Implementing custom GCM in shell is
+not a reviewed crypto solution. An approved authenticated-decryption runtime or
+server-supported CLI issuance contract is needed to finish automatic hosted
+lifecycle within the allowed dependency model. This run adds neither dependency
+nor an unauthenticated decrypt/fallback, and does not claim hosted support.
+
+Inspected the credential provisioning/hosted sections of nano-ludus PR #6: its hosted path accepts pre-issued source
+tokens; only open-core provisions through `/api/ingest-tokens`. It does not solve
+the hosted encrypted issuance requirement.
+
+## Follow-up validation
+
+- 77 offline CLI checks pass on Bash 5.3.15 and actual Bash 3.2.57.
+- JSON/escaping/path/hash units pass on both versions and Bash POSIX mode.
+- Shellcheck, Bash syntax, static Bash 3.2 compatibility and git whitespace pass.
+- Existing structural TS goldens remain checked by the full suite. Rendering and
+  the pinned image are unchanged; no new host Docker/installer/service execution.
+- New tests cover required/stable/distinct HEC channels, two-source complete and
+  delayed evidence, partial and wrong-source evidence, duplicate marker refusal,
+  deadline expiry, final line without newline, hosted alternate API detection,
+  and scope-denied diagnostics. Fixtures do not establish live hosted acceptance.
+
+## Coordinator work still required
+
+Do not release or deprecate npm. Resolve the hosted runtime/API contract, complete
+hosted lifecycle support and rerun CT108 + hosted b12 acceptance with fresh keys
+having the stated scopes. Send distinct markers through both collector listeners,
+record their send times, and run evidence verification immediately. Repeat
+revoke/rotate isolation and confirm requests land under their token's source.
+No live tenant/lab API, service, installer, host Docker, Slack, or secret output
+was used in this follow-up. The earlier implementation report follows for history.
+
+---
+
 # NAN-3942 standalone Bash client results
 
 Implemented `connect.sh` 0.4.0, primary-path documentation, a complete TS-module

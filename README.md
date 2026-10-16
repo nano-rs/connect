@@ -53,6 +53,57 @@ Profiles and credentials are isolated per instance in
 Legacy npm profiles and install `.env` secrets are deliberately not imported.
 `--env-file` reads only `BASE_URL` and never executes file content.
 
+Open-core credential management requires `settings:system`. Hosted discovery
+requires `log_sources:view`; hosted request/reveal/revoke requires
+`log_sources:deploy`; verification requires `search:execute`. The key and its
+owning user also need visibility of the selected sources. Parser import/publish
+requires the parser and source permissions named by those APIs. A search-only key
+cannot provision credentials.
+
+**Hosted automatic provisioning is currently blocked.** A 404 from
+`/api/ingest-tokens` triggers discovery through `/api/log-sources/ingest-endpoint`
+and `/api/log-sources/ingest-credentials`. Hosted issuance is a separate
+request → poll → one-time reveal contract, using a public reveal key and an
+ECDH/HKDF/AES-GCM envelope. It never returns an open-core plaintext `nit_` token.
+This Bash client diagnoses that contract and stops before issuance or revocation;
+it does not yet implement the envelope opener. Stock `openssl enc` cannot decrypt
+AEAD envelopes. Ludus #6 accepts pre-issued hosted source tokens; it does not
+implement this issuance flow either. Hosted create/reuse/rotate CLI parity and the
+hosted b12 acceptance run remain release blockers. Do not treat `--token-dir` as
+a hosted bypass: it currently validates against the open-core token API.
+
+A source credential decides where an event is stored. Sending source B's claimed
+HEC sourcetype or HTTP path with source A's credential is accepted under **A**;
+the claim cannot override the binding. Revoked tokens are refused. A supplied
+credential for the wrong requested source is rejected locally before sending.
+
+HEC connectivity requests include a private UUID v4 channel, persisted as a 0600
+file per profile/source under `channels/`. It survives reruns and rotations.
+Vector 0.59's HEC sink generates its own UUID channel and includes it on event
+and acknowledgement requests; its supported config has no channel override.
+
+For collector delivery proof, send a different marker in **each actual request**
+through the collector's listeners, then record the expected token source and
+marker in a file (one `source marker` pair per line):
+
+```text
+cisco_asa proof-cisco-request-001
+palo_alto proof-palo-request-002
+```
+
+```bash
+bash connect.sh verify --evidence-file /private/request-evidence.txt --wait-seconds 120
+```
+
+Markers must be distinct, 8–128 ASCII letters/digits/underscores/hyphens. Verification
+searches each marker with `metadata.log_source`, checks the returned canonical
+stored source, remembers successful requests, and polls only missing ones within
+one shared deadline. `--wait-seconds 0` takes one snapshot. A partial result exits
+nonzero and names missing evidence. This command sends no events: direct API
+connectivity cannot prove collector delivery. Start verification immediately after
+sending; the verifier's deadline starts when polling starts, so the coordinator
+must also record send times for the end-to-end two-minute acceptance.
+
 Token directories are 0700 and token files 0600. Collector configs use Vector's
 secret directory backend; no tokens appear in TOML or terminal output. Windows
 installer artifacts restrict the secret directory ACL to Administrators and SYSTEM.
@@ -252,8 +303,9 @@ is no flag to turn it off.
 port can also write to it. Use it on a trusted network or VPN — or use `--transport http`, which
 authenticates every request with your ingest token.
 
-**HTTP fans out per source_type.** nano routes on the `X-Source-Type` *request header*, not on any
-`source_type` field in the body, and Vector's http sink headers are static per sink. So each
+**HTTP fans out per source_type.** Current source credentials determine the stored source;
+claimed headers or body fields cannot override that binding. The retained npm renderer uses
+static per-sink headers, while the Bash client uses one bound token per sink. So each
 device type gets its own `[sinks.nano_<source_type>]` block. Add a device → add a sink. On the
 aggregator, agent source types outside the known set land in `agent_route._unmatched` and are
 **dropped** rather than mislabeled (Vector reports this as a config warning, by design).

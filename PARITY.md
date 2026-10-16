@@ -76,3 +76,18 @@ shared-token sink would violate the new credential contract.
   generated configuration implements its public HTTP/protobuf/Bearer contract,
   gated by NANO_OTLP_SOURCE_AUTH_RELEASED=1; it never contacts the internal nginx
   auth endpoint or exposes raw OTLP ports. Live proof waits for that release.
+
+## Live-proof follow-up (0.4.1)
+
+| Requirement | Implementation | Offline proof / limit |
+|---|---|---|
+| HEC request channel | `hec_channel`, `request`: private UUID persisted per instance/source | Header required by mock; stable across processes; independent between sources. Vector already generates channels in its HEC service. |
+| Hosted discovery/scopes | `load_tokens`, `api`: probe alternate hosted endpoint and credential list after open-core 404 | Hosted and missing-scope fixtures; **hosted automatic lifecycle blocked** on sealed-token opening under allowed runtime deps. No issuance/revoke attempted. |
+| Token-authoritative routing | Server stores requests under token source, regardless of source claims | Mock accepts B claim with A token, then evidence passes only under A. Local wrong-source credential validation stays strict. |
+| Per-request collector evidence | `verify_evidence`: distinct markers, canonical stored source, shared deadline ≤120s | Complete/partial/wrong source, distinct markers, delayed second source, no final newline, timeout cases. Coordinator must send through real collector and record send times. |
+
+Hosted is not equivalent to open-core: its request/poll/reveal API seals the token
+with ECDH + HKDF-SHA256 + AES-256-GCM. Detection and actionable errors are present;
+create/reuse/rotate parity is still blocked. See RESULTS.md for source locations
+and the exact remaining decision. No handwritten crypto or plaintext fallback
+was added.
