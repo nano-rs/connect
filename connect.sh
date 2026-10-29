@@ -4,7 +4,7 @@
 set +x
 set -euo pipefail
 umask 077
-VERSION=0.4.3
+VERSION=0.4.4
 VECTOR_IMAGE='timberio/vector:0.59.0-alpine@sha256:0e36bc2a290039e9b6a5e92f04bd2f133223506f72d09682c1df16c015172b7a'
 fail() { printf 'connect: %s\n' "$*" >&2; exit 1; }
 note() { if [ -t 1 ] && [ -z "${NO_COLOR+x}" ]; then printf '\033[36m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
@@ -595,7 +595,10 @@ source = '''
 EOF
 }
 render_sink() {
-  local st=$1 input=$2
+  local st=$1 input=$2 codec=text content_type=text/plain
+  # Hosted HTTPS ingest validates JSON before handing the original message to
+  # the parser. Open core's byte decoder still needs raw lines on this path.
+  if [ "$DEPLOYMENT" = hosted ]; then codec=json; content_type=application/json; fi
   if [ "$TRANSPORT" = hec ]; then
     cat <<EOF
 [sinks.nano_$st]
@@ -617,11 +620,11 @@ type = "http"
 inputs = ["$input"]
 uri = $(q "$INGEST_URL")
 method = "post"
-encoding.codec = "text"
+encoding.codec = "$codec"
 framing.method = "newline_delimited"
 auth.strategy = "bearer"
 auth.token = "SECRET[nano_ingest.$st]"
-request.headers.Content-Type = "text/plain"
+request.headers.Content-Type = "$content_type"
 EOF
   fi
   cat <<EOF

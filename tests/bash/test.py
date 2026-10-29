@@ -55,6 +55,8 @@ with tempfile.TemporaryDirectory(prefix='connect-tests-') as td:
     for f in (tmp/'out/secrets').iterdir(): assert stat.S_IMODE(f.stat().st_mode)==0o600
     assert stat.S_IMODE((tmp/'out/secrets').stat().st_mode)==0o700
     run('add-source','--sources','cisco_asa','--transport','http');assert config()['sinks']['nano_cisco_asa']['auth']['strategy']=='bearer';validate('syslog HTTP')
+    assert config()['sinks']['nano_cisco_asa']['encoding']['codec']=='text'
+    assert config()['sinks']['nano_cisco_asa']['request']['headers']['Content-Type']=='text/plain'
     run('add-source','--sources','cisco_asa','--run');assert 'up -d' in (tmp/'docker-calls').read_text()
     run('add-source','--sources','routeros','--deploy-parsers',extra={'MOCK_MISSING':'routeros'})
     assert state().get('published')
@@ -115,6 +117,13 @@ with tempfile.TemporaryDirectory(prefix='connect-tests-') as td:
     assert stat.S_IMODE(next((home/'config').glob('nano-connect-bash/*/credentials/cisco_asa/hosted-token')).stat().st_mode)==0o600
     run('connect','--source','cisco_asa','--token-file',str(hosted_token),extra=hosted)
     run('connect','--source','cisco_asa','--transport','http',extra=hosted)
+    run('add-source','--sources','cisco_asa','--transport','http','--token-file',str(hosted_token),extra=hosted)
+    sink=config()['sinks']['nano_cisco_asa']
+    assert sink['encoding']['codec']=='json', 'Hosted HTTPS ingest requires JSON; raw text is rejected'
+    assert sink['request']['headers']['Content-Type']=='application/json'
+    assert sink['framing']['method']=='newline_delimited'
+    assert sink['auth']['token']=='SECRET[nano_ingest.cisco_asa]'
+    validate('hosted syslog HTTPS JSON')
     run('add-source','--sources','cisco_asa',extra=dict(hosted,MOCK_METADATA_DENIED='1'))
     metadata={'credential_id':'hosted-1','kind':'source','state':'active','protocol':'hec','source_slugs':['cisco_asa']}
     hm=dict(hosted,MOCK_HOSTED_CREDENTIALS=json.dumps([metadata]))
