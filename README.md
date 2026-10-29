@@ -112,6 +112,11 @@ prove actual token possession/routing, and use collector evidence below before
 claiming delivery. Rendering alone proves neither. Wrong IDs/bindings and shared
 collector credentials are rejected when an ID is provided.
 
+Hosted HTTP collectors send newline-delimited JSON with the original log in
+`message`; self-hosted HTTP collectors retain raw text. HEC is the default for
+both. Regenerate existing hosted `--transport http` collectors after updating
+the script: older configs sent raw text, which hosted JSON ingest rejects.
+
 Hosted automatic issuance is intentionally delegated to the UI: its one-time
 ECDH/HKDF/AES-GCM reveal is designed for the browser. No crypto dependency or
 server-contract change is introduced. Hosted `rotate-token`, `--rotate` and
