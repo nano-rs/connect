@@ -4,7 +4,7 @@
 set +x
 set -euo pipefail
 umask 077
-VERSION=0.5.0
+VERSION=0.5.1
 VECTOR_IMAGE='timberio/vector:0.59.0-alpine@sha256:0e36bc2a290039e9b6a5e92f04bd2f133223506f72d09682c1df16c015172b7a'
 fail() { printf 'connect: %s\n' "$*" >&2; exit 1; }
 note() { if [ -t 1 ] && [ -z "${NO_COLOR+x}" ]; then printf '\033[36m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
@@ -1181,4 +1181,8 @@ main() {
       ;;
   esac
 }
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
+# Run unless sourced. Piped (`curl ... | bash -s -- args`) there is no
+# BASH_SOURCE entry; under set -u it must not be dereferenced bare. Keep this
+# the last line: bash has then read the whole script from stdin, so nothing
+# main runs can consume script text.
+if [ "${BASH_SOURCE[0]-$0}" = "$0" ]; then main "$@"; fi
