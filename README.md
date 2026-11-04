@@ -103,23 +103,24 @@ bash connect.sh add-source --sources cisco_asa --transport hec --ingest-url http
 
 ## Transports
 
-The collector's upstream is HTTP (default) or HEC. Both authenticate with the
-source's ingest token and carry the original log line unchanged:
+HEC and HTTP are both first-class. Both authenticate with the source's ingest
+token, carry the original log line unchanged, use a disk buffer, and land the
+same events under the same `metadata.log_source`. HEC is the default, as in 0.4.x.
 
-- **HTTP** (`--transport http`, the default): newline-delimited `text/plain` to
-  `<ingest>/ingest` with `Authorization: Bearer <token>`, with a disk buffer.
-  This goes through the ingest edge, which terminates TLS like the app.
-- **HEC** (`--transport hec`): Vector's `splunk_hec_logs` sink to the instance's
-  HEC listener (`:8088` by default, plain HTTP unless the deployment terminates
-  TLS in front of it), with gzip and a disk buffer. The token goes in
-  `Authorization: Splunk <token>`.
+| | HEC (`--transport hec`, default) | HTTP (`--transport http`) |
+|---|---|---|
+| Destination | the instance's HEC listener (`hec_url`; port 8088 unless the deployment sets `NANO_INGEST_HEC_PORT`) | `<ingest>/ingest` on the ingest edge |
+| Auth header | `Authorization: Splunk <token>` | `Authorization: Bearer <token>` |
+| Wire | Vector `splunk_hec_logs`, gzip, the log line as the event string | newline-delimited `text/plain` |
+| TLS | whatever the deployment puts in front of the HEC listener (`NANO_INGEST_HEC_SCHEME`); plain HTTP by default on open core | the edge's TLS, same as the app |
 
-HTTP is the default since 0.5.0. On the current ClickHouse build, events sent over
-HEC to a source whose parser does not set its own `metadata.log_source` (the
-generic `syslog` and `json_generic` parsers) are stored under `unknown` (OTLP
-logs to such a source too), and
-HEC indexer acknowledgements are refused (the collector falls back to the HTTP
-200). Use HEC for sources with a vendor parser, or once those are fixed.
+Choose HTTP when the collector reaches nano over a network you don't trust and
+the HEC listener has no TLS in front of it, or when only the edge is reachable
+(for example through a single ingest load balancer). Otherwise either works.
+
+HEC indexer acknowledgements are requested; the current ClickHouse build answers
+the acknowledgement query with 400, so Vector logs `indexer_ack_failed` and
+acknowledges on the HTTP 200 instead. Delivery is unaffected.
 
 The token decides where an event is stored. A sender that claims another
 sourcetype is still stored under the token's source; the claim is kept only as
@@ -232,9 +233,9 @@ under its source. Use one exporter configuration per source.
 0.5.0 targets the ClickHouse product and removes the lake hosted model:
 `--token-file`, `--credential-id` and the hosted Direct-credential import are
 gone (use `--token-dir`, or let the client issue tokens), there are no
-tenant-prefixed URLs, HTTP collectors always send raw text, and the default
-transport is HTTP. `revoke-token` now revokes, and `otlp-config` has no release
-gate. Regenerate existing collectors.
+tenant-prefixed URLs, and HTTP collectors always send raw text. HEC stays the
+default. `revoke-token` now revokes, and `otlp-config` has no release gate.
+Regenerate existing collectors.
 
 ## Development
 

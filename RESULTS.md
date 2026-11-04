@@ -1,6 +1,6 @@
 # NAN-4974: connect.sh 0.5.0 against the ClickHouse product
 
-Target: nanosiem `clickhouse/dev` at `ae4872a3a` (API 0.1.703), OCSF schema
+Targets: nanosiem `clickhouse/dev` at `db9d0ccba` (current, both transports) and earlier `ae4872a3a` (API 0.1.703), OCSF schema
 profile (the install default), brought up with `scripts/e2e.sh up` as
 throwaway, ownership-labelled stacks on free ports. No shared or developer
 stack was used. Collectors ran in Docker from the client's own artifacts.
@@ -23,6 +23,35 @@ refusal of app-host destinations while a dedicated base is configured, by
 `--ingest-url`, HEC URL and `--ingest-base`; OTLP endpoint on the dedicated
 host), default HTTP transport, `delivery: none` stopping issuance, removed
 lake flags and env, `revoke-token`, and journald JSON output.
+
+## Live re-run after NAN-4963: both transports (current result)
+
+clickhouse/dev `db9d0ccba` (NAN-4963 merged, #8710), enterprise build, OCSF,
+fresh `scripts/e2e.sh` stack in its own worktree and target dir. Same client,
+same matrix per transport: one `add-source --run` collector (cisco_asa UDP,
+palo_alto TCP, syslog UDP) plus one Linux agent (journald + file
+`json_generic`) installed with the generated systemd unit; one marker per real
+request, checked with `verify --evidence-file --wait-seconds 120`.
+
+| Source | HEC (`--transport hec`) | HTTP (`--transport http`) |
+|---|---|---|
+| syslog UDP `cisco_asa` | lands, `metadata.log_source=cisco_asa` | lands, `cisco_asa` |
+| syslog TCP `palo_alto` | lands, `palo_alto` | lands, `palo_alto` |
+| syslog UDP generic `syslog` | lands, `syslog` (was `unknown` before NAN-4963) | lands, `syslog` |
+| journald `linux_journald` | lands, `linux_journald` | lands, `linux_journald` |
+| file `json_generic` | lands, `json_generic` (was `unknown` before NAN-4963) | lands, `json_generic` |
+| evidence run | all five found in one run | all five found in one run |
+
+No `source_type=unknown` rows in the window. An OTLP/HTTP protobuf log sent
+with the `json_generic` token through `<edge>/otlp/v1/logs` also landed under
+`json_generic` (it was `unknown` before). HEC indexer acknowledgements still
+fail (`POST /services/collector/ack` → 400; Vector acknowledges on the 200);
+delivery is unaffected.
+
+With HEC clean, 0.5.0 keeps **HEC as the default** (as in 0.4.x), with HTTP as
+an equal, fully supported alternative.
+
+The two sections below are the earlier run on `ae4872a3a`, kept for the record.
 
 ## Live: enterprise build, OCSF
 
@@ -56,7 +85,7 @@ was refused (`refusing to send events to the app origin`).
 Built with `--edition open` into a separate `CARGO_TARGET_DIR`;
 `capabilities.edition = open`. Fresh profile, fresh stack (no pre-existing log
 sources: every source below was imported from the registry and published by
-the client with `--deploy-parsers`). Default transport (HTTP) throughout.
+the client with `--deploy-parsers`). HTTP transport throughout (the interim default on that build).
 
 | Source | Collector | Result |
 |---|---|---|
@@ -90,8 +119,8 @@ the client with `--deploy-parsers`). Default transport (HTTP) throughout.
    returns 400 (`BadRequest` in the server's Vector log), so `splunk_hec_logs`
    logs `indexer_ack_failed` and falls back to acknowledging on the 200.
 
-Because of (1), and because `/ingest` is the TLS-terminated edge path (HEC is
-plain HTTP on 8088 by default), 0.5.0 makes `--transport http` the default.
+Finding 1 is fixed by NAN-4963 (`db9d0ccba`) and re-verified above; finding 2
+remains. HEC stays the default.
 
 ## Findings on the collector side
 

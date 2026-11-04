@@ -996,7 +996,7 @@ Usage: bash connect.sh [connect|add-source|add-agent|add-aggregator|list-sources
   --url URL / NANO_URL (the nano app)    --api-key KEY / NANO_API_KEY
   --email EMAIL / NANO_EMAIL            --password PASSWORD / NANO_PASSWORD
   --env-file FILE (read BASE_URL only; never execute)
-  --transport http|hec / NANO_TRANSPORT (default http: <ingest>/ingest; hec: the HEC listener)
+  --transport hec|http / NANO_TRANSPORT (default hec: the HEC listener; http: <ingest>/ingest)
   --ingest-base ORIGIN / NANO_INGEST_BASE (dedicated ingest host, e.g. https://ingest.example.com)
   --ingest-url URL / NANO_INGEST_URL (exact URL for the transport)
   --search-url URL / NANO_SEARCH_URL
@@ -1024,7 +1024,7 @@ main() {
   URL=${NANO_URL:-}; API_KEY=${NANO_API_KEY:-}; EMAIL=${NANO_EMAIL:-}; PASSWORD=${NANO_PASSWORD:-}; JWT=
   INGEST_URL=${NANO_INGEST_URL:-}; INGEST_BASE=${NANO_INGEST_BASE:-}; DELIVERY=; SEARCH_URL=${NANO_SEARCH_URL:-}; ENV_FILE=
   SOURCE=${NANO_SOURCE:-}; SOURCES=${NANO_SOURCES:-}; OUT=${NANO_OUT_DIR:-}; OS=${NANO_OS:-}; TARGET=${NANO_TARGET:-}
-  TRANSPORT=${NANO_TRANSPORT:-http}; TOKEN_DIR=${NANO_TOKEN_DIR:-}; ROTATE=0; RUN=0; JOURNALD=1; FILES=; FILE_SOURCE=application
+  TRANSPORT=${NANO_TRANSPORT:-hec}; TOKEN_DIR=${NANO_TOKEN_DIR:-}; ROTATE=0; RUN=0; JOURNALD=1; FILES=; FILE_SOURCE=application
   AGENT_PORT=9000; WINDOW=15; DEPLOY_PARSERS=0; NATIVE_INPUT=tag; ADD_OFFICIAL=0; BUILTIN=0; YES=${NANO_YES:-0}; NONINTERACTIVE=${NANO_NON_INTERACTIVE:-0}
   CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/nano-connect-bash
   COMMAND=connect; UPSTREAM=tag; TOKEN=; HEC_CHANNEL=

@@ -124,8 +124,10 @@ with tempfile.TemporaryDirectory(prefix='connect-tests-') as td:
     run('add-source','--sources','apache_access',extra={'MOCK_DISABLED':'1'},ok=False)
     run('connect','--source','apache_access')
 
-    # 0.5.0 default transport: HTTP through the ingest edge (TLS like the UI).
+    # Default transport is HEC (as in 0.4.x); HTTP is the equal alternative.
     reset();run('add-source','--sources','cisco_asa',extra={'NANO_TRANSPORT':''})
+    sink=config()['sinks']['nano_cisco_asa'];assert sink['type']=='splunk_hec_logs' and sink['endpoint']=='https://nano.test:18088'
+    run('add-source','--sources','cisco_asa','--transport','http',extra={'NANO_TRANSPORT':''})
     sink=config()['sinks']['nano_cisco_asa'];assert sink['type']=='http' and sink['uri']=='https://nano.test/ingest'
     assert sink['encoding']['codec']=='text' and sink['request']['headers']['Content-Type']=='text/plain'
     # Journald entries leave the agent as `journalctl -o json` objects.
