@@ -1,104 +1,86 @@
-# TypeScript → Bash parity (NAN-3942)
+# Parity: connect.sh 0.4.4 (lake hosted model) → 0.5.0 (ClickHouse product)
 
-Runtime is one `connect.sh`; Node/TypeScript and Python are test tooling only.
-Tests referenced below live in `tests/bash/`: `test.py` is the offline curl/command
-harness, `unit.sh` tests narrow extraction, and `golden.ts` generates retained-TS
-fixtures. `test.py` compares source configs and whitespace/comment-normalized VRL
-against those fixtures. Sink changes are explicit assertions, because a legacy
-shared-token sink would violate the new credential contract.
+0.5.0 retargets the Bash client at the ClickHouse product (nanosiem
+`clickhouse/dev`, the v2.0.0 candidate). Every deployment model (open core,
+enterprise self-hosted, BYOC, Civo) serves the same API, so the client has one
+path. The endpoints below are from `nanosiem-api/src/routes.rs` and the handler
+OpenAPI annotations on `clickhouse/dev`.
 
-| TS feature / file | Bash function / behavior | Verification |
-| --- | --- | --- |
-| `index.ts`, `ui/ui.ts` commands, flags, errors | `main`, `help_text`, `prompt`, `confirm`, `note`, `fail`; plain read, TTY colors, NO_COLOR, flags/env, --yes | help/version/missing input/injection cases; Bash 3.2/5 |
-| `flow.ts` setup/auth/save/connectivity | `profile`, `require_key`, `connect_flow`, `search`; send to an existing bound source and require searchable marker | mocked login/mint, setup, ingest and search |
-| `addSource.ts` | `select_sources`, `render_socket`, `render`, `compose` | HEC/HTTP fixtures, selector/dedup, raw bytes, Vector validation |
-| `addAgent.ts` | `render_agent`, `render`, `platform_artifacts` | Linux/Windows TS golden, native trusted target, file-only collection |
-| `addAggregator.ts` | `render`, `compose`; agents + optional per-port syslog | TS source golden and Vector validation |
-| `listSources.ts` | `catalog`, `load_tokens`, `load_catalog`; built-ins, bindable instance routes, community syslog parsers | offline builtins and API harness |
-| `selectSources.ts` | `select_sources`, `canonical_source`; comma-separated read prompt, :udp/:tcp/:http, aliases, dedup | selector, alias, wrong transport tests |
-| `syncParsers.ts` | `parsers`; official registration, enabled repositories, bounded sync poll | sync fixture; explicit errors for missing status/timeouts |
-| `reviewParsers.ts` | `review_parser`; opt-in import + publish; success=false fails | missing-source import path escaped; publish fixture |
-| `runHere.ts` | `run_here`; explicit --run, Compose v2 checks/pull/up/health | PATH-stubbed Docker; no real deployment |
-| `verifyCmd.ts` | `verify`; sampled count, normalized/generic/parser-failed distinction | search fixtures; never trust total_count |
-| `preflight.ts`, `core/tlsProbe.ts` | direct nano native removed; curl verifies TLS for HEC/HTTP | native/mtls flags fail with migration hint |
-| `core/api.ts`, `core/types.ts` | `request`, `api`, `field`, `records`; timeouts, status checks, response bodies withheld | HTTP 401/403/500; nested/escaped JSON units; no secret argv/output |
-| `core/env.ts` | `profile` reads explicit BASE_URL only, never sources a file | shell inspection; no install-token import |
-| `core/profile.ts`, `core/connection.ts` | `profile`, `atomic`, `private_dir`; per-instance URL collision check, private API key, per-transport endpoint overrides | different-instance rejection, file mode assertions |
-| `core/endpoints.ts` | `url_check`, `profile`; explicit split endpoints; normalize missing scheme/trailing slash | reject userinfo/config injection; HTTP/HEC endpoints |
-| `core/scopes.ts` | `require_key`; search/parser scopes + settings:system for credential lifecycle | login/mint stub; no secret output |
-| `core/catalog.ts` | `catalog`; same nine source types/ports/modes | TS golden and builtins list |
-| `core/discovery.ts` | `load_catalog`, `lookup_in`, `aliases`, `syslog_collectable`, `canonical_source`, `hash_port`, `select_sources` | canonical alias, category/transport gate, FNV ports and collision bound |
-| `core/parsers.ts` | `load_catalog`, `lookup_parser`, `review_parser`, `encode_path` | import then publish, success check, escaped #/?/spaces |
-| `core/vector.ts` | `render_sink`, `render`; raw text, disk minimum, block buffer, metrics; per-source secret backend | golden structural checks, six real Vector validations |
-| `core/syslog.ts` | `render_socket`, `render`, `compose`, `platform_artifacts` | raw-wire source/VRL golden, :tcp override |
-| `core/agent.ts` | `render_agent`, `platform_artifacts`; channels/Sysmon split, journald/Sysmon tagging, file tailing; signed MSI/service restart artifact | Linux/Windows golden, file-only/native configs; installers never executed |
-| `core/aggregator.ts` | `render`, `compose`; same four endpoint routes plus selected syslog | source golden + real validation |
-| `core/uplink.ts` | `credential`, `render_sink`, `persist_artifact_token`; HEC or HTTP per source; secret-directory mount | separate sink/token per route, create/reuse/bind/rotate tests |
-| `core/target.ts` | `safe_id`, `port_check`, `target_check`, `url_check` | malicious source/URL, IPv4/IPv6, invalid port cases |
-| `core/artifacts.ts` | `private_dir`, `atomic`, `platform_artifacts` | 0700/0600, repair loose token mode, temp-only rendering |
-| `core/ingest.ts` | `connect_flow`; HEC string event or HTTP JSON message, bound token, searchable marker | wire shape asserted by mock; search proof stub |
-| `core/verify.ts` | `search`, `verify`, `connect_flow`; bounded marker polling, recent-window sample and parse classification | mock marked event + normalized/generic/error samples |
-| NAN-3806 / NAN-3841 additions | `load_tokens`, `source_id`, `find_credential`, `credential`, `retire_pending`; create/reuse/bind/rotate; no shared install fallback | active/wrong-source/unbound/revoked/disabled/legacy cases, persisted-before-revoke assertions |
-| OTLP #6811 addition | `otlp-config`; private source-specific exporter env; public /otlp prefix; explicit release gate | gate refusal, private env mode; live contract requires release |
-| Release packaging | version, `connect.sh.sha256`, `.github/workflows/bash.yml` | checksum verification and version/tag guard |
+**keep**: works unchanged. **change**: kept with a different contract or
+implementation. **drop**: lake-only, removed.
 
-## Intentional changes and exclusions
+## API calls
 
-- Direct Vector-native forwarding to nano, mTLS bundle import/CN probing, and
-  `--mtls-dir`/`--vector-host`/`--vector-port` are removed: those hops cannot prove
-  source-bound token routing. Use HEC/HTTP. A native agent→aggregator hop is
-  retained only for explicitly trusted private networks; it is not an authenticated
-  nano ingest endpoint. No openssl dependency remains.
-- Shared `--ingest-token`/VECTOR_AUTH_TOKEN is refused. A synthetic catch-all
-  connectivity source is not created implicitly; pass `connect --source` for an
-  existing enabled source. Named credentials require the admin settings:system
-  API; read-only key mint fallback cannot satisfy this workflow and is omitted.
-- No automatic migration from npm profiles or automatic install `.env` discovery:
-  importing the legacy shared token would defeat the required model. Explicit
-  --env-file reads only BASE_URL. Split endpoints are explicit and saved per instance;
-  no speculative ingest probing sends source tokens to guessed hosts.
-- Only selected listeners are emitted. Commented dormant listeners are omitted:
-  uncommenting one without provisioning its bound token would silently lose data.
-  Re-run generation to add a source. IDs with dots/control characters are rejected
-  rather than interpolated as unintended TOML table paths; lower-case ASCII
-  alphanumeric/underscore/hyphen route keys are supported.
-- Interactive multi-select becomes a plain comma-separated read prompt. `--yes`
-  uses non-interactive defaults. No implicit deployment prompt: only --run deploys.
-- Parser publishing does not fall back to legacy deploy on 404: those servers
-  cannot prove a fresh draft is active. Sync failures/timeouts return nonzero.
-- Upstream Vector 0.59.0 collector digest replaces TS 0.56.0 and the trimmed nano
-  server image. The nano.7 digest was tried: it lacks `splunk_hec_logs`, so cannot
-  validate/run the required HEC sender. Use the same upstream sender as Ludus #6.
-- Windows collection/installer syntax is compared against retained TS output;
-  Linux Vector cannot validate the Windows-only source. Windows execution remains
-  coordinator/endpoint proof, not a claimed Linux validation.
-- OTLP source authentication is unreleased (#6811 was OPEN on inspection). The
-  generated configuration implements its public HTTP/protobuf/Bearer contract,
-  gated by NANO_OTLP_SOURCE_AUTH_RELEASED=1; it never contacts the internal nginx
-  auth endpoint or exposes raw OTLP ports. Live proof waits for that release.
+| connect.sh 0.4.4 call | Used by | clickhouse/dev equivalent | Verdict |
+|---|---|---|---|
+| `POST /api/auth/login` | `require_key` (email sign-in) | same (`handlers::auth::login`) | keep |
+| `POST /api/api-keys` (search, log_sources, parser_repositories, source_configs, settings:system) | `require_key` | same; every requested permission exists in `auth::permissions` | keep |
+| `GET /api/setup/status` (`initialized`) | `connect` | same (public) | keep; now checked on every deployment |
+| `GET /api/ingest-tokens` → `tokens`, `sources` | `load_tokens` (open core) | same (NAN-4907). Needs `log_sources:view` (was documented as settings:system). Adds `delivery`, `install_token` | change: the only discovery path; `delivery: none` stops issuance up front; 403/404 messages name the right permission and API |
+| `POST /api/ingest-tokens` `{name, source_id}` → `{credential, token}` | `credential` | same; 201, `settings:system`, 503 when delivery is not configured | keep |
+| `POST /api/ingest-tokens/{id}/bind` | `credential` (`--token-dir`, unbound token) | same | keep |
+| `POST /api/ingest-tokens/{id}/revoke` | `retire_pending` (rotation) | same | keep; also backs the new `revoke-token` |
+| — | `revoke-token` (0.4.4 refused) | `POST /api/ingest-tokens/{id}/revoke` | change: implemented for the token the client issued |
+| `GET /api/log-sources/ingest-endpoint` → `base_url` | hosted discovery probe only | open core (NAN-4922): `base_url`, `nano_https_url`, `hec_url`, `otlp_*_url`, `configured`, `token_delivery` | change: now the ingest URL resolver for every deployment |
+| — | — | `GET /api/capabilities` → `edition` | new: decides whether falling back to the app host is allowed |
+| `GET /api/log-sources/ingest-credentials` | hosted Direct credential metadata | none on clickhouse/dev | drop |
+| `GET /api/log-sources` (hosted `source_type=routed` rows) | hosted source discovery; registry alias mapping | same (bare array of `LogSource`) | change: used only to map registry aliases to deployed sources |
+| `GET /api/parser-repositories` → `repositories` | `load_catalog`, `sync-parsers` | same; the official row is `nano-rs/parsers` (OCSF on `main`, `legacy/clickhouse` for UDM installs), first-party only (NAN-4947) | keep |
+| `GET /api/parser-repositories/{id}/parsers` (bare array) | `load_catalog` | same (`RepositoryParserResponse`: `name`, `file_path`, `raw_content`, `kind`, `is_imported`, `linked_log_source_id`) | keep |
+| `POST /api/parser-repositories/{id}/parsers/import/{path}` `{import_type: linked, ingestion_method: routed}` → `log_source_id` | `review_parser` | same | keep |
+| `POST /api/log-sources/{id}/publish` → `success` | `review_parser` | same (`log_sources:deploy`) | keep |
+| `POST /api/parser-repositories` (official repository) | `sync-parsers --add-official` | same; only first-party URLs are accepted | keep |
+| `POST /api/parser-repositories/{id}/sync`, `GET …/sync/status` | `sync-parsers` | same | keep |
+| `POST /api/search` (`query`, `time_range`, `limit`, …) → `results` | `connect`, `verify` | same (search service behind the edge's `/api/search`); `metadata.log_source` is an alias of the stored `source_type` (NAN-4903) | keep |
 
-## Live-proof follow-up (0.4.1)
+## Transports and URLs
 
-| Requirement | Implementation | Offline proof / limit |
+| 0.4.4 behaviour | clickhouse/dev | Verdict |
 |---|---|---|
-| HEC request channel | `hec_channel`, `request`: private UUID persisted per instance/source | Header required by mock; stable across processes; independent between sources. Vector already generates channels in its HEC service. |
-| Hosted discovery/scopes | `load_tokens`, `api`: probe alternate hosted endpoint and credential list after open-core 404 | Hosted and missing-scope fixtures; UI-issued source credentials imported via `--token-file`, hidden prompt or per-source directory; optional ID metadata validation. No hosted issuance/revoke API mutation. |
-| Token-authoritative routing | Server stores requests under token source, regardless of source claims | Mock accepts B claim with A token, then evidence passes only under A. Local wrong-source credential validation stays strict. |
-| Per-request collector evidence | `verify_evidence`: distinct markers, canonical stored source, shared deadline ≤120s | Complete/partial/wrong source, distinct markers, delayed second source, no final newline, timeout cases. Coordinator must send through real collector and record send times. |
+| Default transport HEC; HTTP alternative | HEC is Vector's own listener (`hec_url`); `/ingest` is on the TLS edge and the dedicated ingest frontend. Both lanes stamp `metadata.log_source` from the token since NAN-4963 (`db9d0ccba`) | keep: HEC default, HTTP equal; both live-verified on every source |
+| HEC sink `splunk_hec_logs`, `Authorization: Splunk`, indexer acks, request channel | Vector `splunk_hec_ingest` on `:8088`, `valid_tokens_file`, `acknowledgements.enabled = true`; the token's route overrides the claimed sourcetype | keep. On `ae4872a3a` HEC/OTLP events for generic parsers were stored as `unknown`; fixed by NAN-4963 and re-verified. `POST /services/collector/ack` still answers 400 at `db9d0ccba`, so the sink logs `indexer_ack_failed` and acknowledges on the 200 |
+| HEC base defaulted to the app URL (`$URL`) | HEC is Vector's own listener, `hec_url` = `<scheme>://<host>:<NANO_INGEST_HEC_PORT or 8088>` | change: taken from `hec_url`, or the chosen ingest host plus the instance's HEC port |
+| HTTP sink to `$URL/ingest/`, raw text (open core) | edge `location = /ingest` and `/ingest/` → Vector `http_ingest` (`newline_delimited`, `bytes`; text/plain lines are the message) | keep (raw `text/plain`); URL from the resolver |
+| HTTP sink as NDJSON JSON for hosted | — | drop (hosted HTTPS JSON validator is lake-only) |
+| `--ingest-url` explicit, saved per instance/transport; discovered default saved too | dedicated ingest frontend (`NANO_INGEST_PUBLIC_BASE_URL`) on enterprise/BYOC/Civo; app host only on open core | change: `--ingest-url` > new `--ingest-base` > configured dedicated base > app host (only without a dedicated base; enterprise warns; enterprise with an unreadable endpoint fails). Only explicit values are saved. Never the app host while a dedicated base is configured |
+| Tenant-prefixed `NANO_URL` (`/t/<slug>`), `<slug>.ingest.nano.rs` | none | drop (nothing in the client depended on the prefix beyond docs; any URL path is still accepted as the app URL) |
+| `otlp-config` gated on `NANO_OTLP_SOURCE_AUTH_RELEASED=1`, endpoint `$URL/otlp` | edge `/otlp/v1/{logs,traces,metrics}` with `auth_request` to `/api/internal/otlp-auth` (NAN-4907) | change: gate removed; endpoint `<ingest base>/otlp` |
+| Vector-native uplink refused | Vector `:6000` is not a token-authenticated push lane (`is_push_capable("vector") = false`) | keep refused |
 
-Hosted issuance/rotation/revocation intentionally uses Settings → ingest credentials
-for that source (coordinator decision). `hosted_credential` imports and privately
-persists user-created source tokens; optional credential ID checks kind, source,
-state and protocol. The list has no fingerprint, so fresh canonical connectivity
-evidence proves secret binding. Offline import/reuse, denied metadata, mismatched
-metadata, HTTP/HEC, multi-source file refusal and UI lifecycle guidance are tested.
+## Credentials
 
-## Hosted routed/source discovery follow-up (0.4.3)
+| 0.4.4 | clickhouse/dev | Verdict |
+|---|---|---|
+| Open core: named `nit_` token per source, create/reuse/bind/rotate, pending-revoke journal | `ingest_tokens` (NAN-4907): bound once, `token_prefix` = `nit_` + 8 | keep |
+| Hosted: `--token-file`, `NANO_TOKEN_FILE`, hidden prompt, `hosted-token` store | — | drop (flags and env now fail with a migration message) |
+| Hosted: `--credential-id` metadata check (`kind`, `protocol`, `source_slugs`) | — | drop |
+| Hosted: search-only key with explicit token + URL when discovery is 403 | — | drop; discovery needs `log_sources:view` |
+| Hosted rotate/revoke → "use Settings" | rotate/revoke APIs | drop the hosted branch; open-core lifecycle applies everywhere |
+| Shared `--ingest-token` / install token refused | install token still exists (legacy multiplex, deprecated) | keep refused |
 
-Enabled tenant sources bypass the community-only syslog gate. Application parsers
-render raw HTTP push listeners; declared syslog sources retain socket listeners.
-Hosted routed rows resolve their canonical name. An explicit private token plus
-explicit ingest URL permits import when discovery returns 403, with enablement
-and binding warnings and fresh canonical search proof still required. Tests cover
-routed Apache render/connect, transport overrides, search-only discovery denial,
-per-source token directories, missing arguments and disabled sources.
+## Commands
+
+| Command | Verdict | Notes |
+|---|---|---|
+| `connect` | change | setup check on all deployments; resolver; marker search on `metadata.log_source` |
+| `add-source` | change | resolver; no hosted import; HTTP always raw text |
+| `add-agent` (linux journald/files, windows event log/sysmon, `--target`) | change | sinks via resolver; journald entries sent as `journalctl -o json` objects for the OCSF `linux_journald` parser (was MESSAGE only); journald `since_now = true` so a first start doesn't replay the whole journal |
+| `add-aggregator` | keep | sinks via resolver |
+| `list-sources` / `list-devices` | change | registry rows show the route key (first match value, e.g. `cisco_asa` for `cisco_asa_ocsf`), labelled `(registry)`, deduplicated; registry lookups prefer `<name>_ocsf`, so `windows_event` resolves to the JSON parser, not the XML/text variants |
+| `sync-parsers` | keep | |
+| `verify --source` | change | searches `metadata.log_source` (was `source_type`) for fresh events in `--window` |
+| `verify --evidence-file` | keep | |
+| `rotate-token` | keep | |
+| `revoke-token` | change | implemented (0.4.4 always failed) |
+| `otlp-config` | change | release gate removed; ingest-base endpoint |
+
+## Retained from 0.4.x (NAN-3942 TypeScript → Bash port)
+
+Bash 3.2 compatibility (no associative arrays, `mapfile`, `${x,,}`), optional jq
+with fail-closed awk extractors (now linear-time: the ClickHouse parser catalog
+is about 5 MB, which the 0.4.4 extractors took minutes to scan with macOS awk;
+with jq the records are split by jq), private 0700/0600 state, secrets through
+Vector's directory backend, atomic writes, the stable FNV port hash for
+discovered sources, the pinned Vector 0.59.0 image, the PowerShell installer and
+systemd unit generators, and the `connect.sh.sha256` release artifact are
+unchanged. The retained-TS golden fixtures still check source and VRL parity.

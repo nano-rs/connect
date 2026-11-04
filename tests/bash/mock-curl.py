@@ -14,15 +14,18 @@ sources=[dict(source_id='src-'+st,route_key=st,enabled=True) for st in sts if no
 if os.getenv('MOCK_DISABLED'): sources=[dict(x,enabled=False) for x in sources]
 s['calls'].append([method,path])
 if os.getenv('MOCK_HTTP_ERROR'): status=int(os.environ['MOCK_HTTP_ERROR'])
-elif os.getenv('MOCK_HOSTED') and path=='ingest-tokens': status=int(os.getenv('MOCK_TOKEN_STATUS','404'))
-elif os.getenv('MOCK_HOSTED') and path=='log-sources/ingest-endpoint':
-    status=int(os.getenv('MOCK_ENDPOINT_STATUS','403' if os.getenv('MOCK_HOSTED_DENIED') else '200'))
-    result={'base_url':'https://tenant.ingest.nano.test'}
-elif os.getenv('MOCK_HOSTED_DENIED') and path in ('log-sources','parser-repositories'): status=403
-elif os.getenv('MOCK_HOSTED') and path=='log-sources/ingest-credentials': result={'credentials':json.loads(os.getenv('MOCK_HOSTED_CREDENTIALS','[]')), 'requests':[]}; status=403 if (os.getenv('MOCK_METADATA_DENIED') or os.getenv('MOCK_HOSTED_DENIED')) else 200
+elif path=='capabilities': result={'edition':os.getenv('MOCK_EDITION','open'),'version':'2.0.0','capabilities':{}}
+elif path=='log-sources/ingest-endpoint':
+    status=int(os.getenv('MOCK_ENDPOINT_STATUS','200'))
+    base=os.getenv('MOCK_INGEST_BASE') or 'https://nano.test'
+    host=base.split('://',1)[1].split(':')[0]
+    result={'base_url':base,'hostname':host,'scheme':'https','nano_https_url':base+'/ingest','otlp_logs_url':base+'/otlp/v1/logs',
+            'otlp_traces_url':base+'/otlp/v1/traces','otlp_metrics_url':base+'/otlp/v1/metrics','hec_url':'https://'+host+':18088',
+            'hec_event_url':'https://'+host+':18088/services/collector/event','hec_health_url':'https://'+host+':18088/services/collector/health',
+            'configured':bool(os.getenv('MOCK_INGEST_BASE')),'token_delivery':os.getenv('MOCK_DELIVERY','shared_volume')}
 elif path=='setup/status': result={'initialized':True}
 elif path=='ingest-tokens' and method=='GET':
-    result={'tokens':s['tokens'],'sources':sources}
+    result={'tokens':s['tokens'],'sources':sources,'delivery':os.getenv('MOCK_DELIVERY','shared_volume'),'install_token':{'name':'install','state':'not_configured'}}
     if os.getenv('MOCK_LEGACY'): del result['sources']
 elif path=='ingest-tokens' and method=='POST':
     s['seq']+=1; cid='cred-'+str(s['seq']); tok='nit_'+('%08d'%s['seq'])+'-fixture-secret'
@@ -35,9 +38,10 @@ elif path.startswith('ingest-tokens/'):
     if path.endswith('/revoke'):
         # Assert state and artifact persisted BEFORE revocation, with replacement id/value.
         states=list(pathlib.Path(os.environ['XDG_CONFIG_HOME']).glob('nano-connect-bash/*/credentials/*/current'))
-        assert any(x.read_text().splitlines()[0]!=cid and x.read_text().splitlines()[0].startswith('cred-') for x in states)
+        plain=any(x.read_text().splitlines()[0]==cid for x in states)  # revoke-token, not a rotation
+        if not plain: assert any(x.read_text().splitlines()[0]!=cid and x.read_text().splitlines()[0].startswith('cred-') for x in states)
         out=os.getenv('NANO_OUT_DIR')
-        if out: assert (pathlib.Path(out)/'secrets'/cred['route_key']).read_text() != 'nit_'+('%08d'%int(cid.split('-')[1]))+'-fixture-secret'
+        if out and not plain: assert (pathlib.Path(out)/'secrets'/cred['route_key']).read_text() != 'nit_'+('%08d'%int(cid.split('-')[1]))+'-fixture-secret'
         cred['state']='revoked'
     else: cred.update(source_id=data['source_id'],route_key=data['source_id'].removeprefix('src-'),state='active')
 elif path=='log-sources':
@@ -52,7 +56,7 @@ elif path.endswith('/sync/status'): result={'status':'completed','parser_count':
 elif path.endswith('/sync'): result={}
 elif path=='search':
     rows=s['events'] or json.loads(os.getenv('MOCK_RESULTS','[]'))
-    if 'metadata.log_source=' in data['query']:
+    if 'metadata.log_source=' in data['query'] and ' AND ' in data['query']:
         st, marker=re.fullmatch(r'metadata.log_source="([a-z0-9_-]+)" AND "([A-Za-z0-9_-]+)"',data['query']).groups()
         s['evidence_searches']=s.get('evidence_searches',0)+1
         if os.getenv('MOCK_DELAYED_EVIDENCE') and st=='palo_alto' and s['evidence_searches']==2: rows=[]
@@ -60,8 +64,9 @@ elif path=='search':
     result={'results':rows,'total_count':len(rows)}
 elif path=='auth/login':result={'tokens':{'access_token':'fixture-jwt-secret'}}
 elif path=='api-keys':result={'id':'key-1','key':'fixture-api-secret'}
-elif '/services/collector/event' in path or '/ingest/' in url:
+elif '/services/collector/event' in path or '/ingest' in url:
     assert 'Authorization:' in headers
+    s.setdefault('ingest_urls',[]).append(url)
     if 'event' in data: assert isinstance(data['event'],str), 'HEC event must be original string'
     token=re.search(r'Authorization: (?:Splunk|Bearer) (\S+)',headers).group(1)
     cred=next(t for t in s['tokens'] if t['token_prefix']==token[:12])
