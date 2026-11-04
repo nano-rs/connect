@@ -53,6 +53,23 @@ with tempfile.TemporaryDirectory(prefix='connect-tests-') as td:
         assert p.returncode==0,(label,p.stdout,p.stderr)
     def config():return tomllib.loads((tmp/'out/vector.toml').read_text())
     run('--version');run('--help');run('list-sources','--builtin-only');run('verify',ok=False)
+    # Piped execution: `curl -fsSL .../connect.sh | bash -s -- <args>`.
+    def piped(*args,ok=True,extra=None):
+        global count
+        e=dict(env);e.update(extra or {})
+        p=subprocess.run([BASH,'-s','--',*args],input=SCRIPT.read_text(),env=e,text=True,capture_output=True)
+        assert (p.returncode==0)==ok,(args,p.returncode,p.stdout,p.stderr)
+        assert 'unbound variable' not in p.stderr,p.stderr
+        assert not any(secret in p.stdout+p.stderr for secret in ('-fixture-secret','fixture-api-secret'))
+        count+=1;return p
+    assert piped('--version').stdout.strip()==subprocess.run([BASH,str(SCRIPT),'--version'],text=True,capture_output=True).stdout.strip()
+    assert 'cisco_asa 5514 udp' in piped('list-sources','--builtin-only').stdout
+    piped('add-source','--sources','cisco_asa');assert config()['sinks']['nano_cisco_asa']['default_token']=='SECRET[nano_ingest.cisco_asa]'
+    piped('add-source','--sources','x"',ok=False)
+    p=subprocess.run([BASH,'-c','source "$1"; type main >/dev/null && echo sourced-ok','x',str(SCRIPT)],env=env,text=True,capture_output=True)
+    assert p.returncode==0 and p.stdout.strip()=='sourced-ok',(p.stdout,p.stderr)  # sourcing still defines without running
+    count+=1
+    reset()
     for bad in ('0','65536','-1','hello'):run('add-aggregator','--agent-port',bad,ok=False)
     run('add-source','--sources','cisco_asa:tcp,cisco_asa')
     validate('syslog HEC');c=config();assert len(c['sources'])==2 and c['sources']['cisco_asa']['mode']=='tcp'

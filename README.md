@@ -18,6 +18,9 @@ curl -fsSL https://github.com/nano-rs/connect/releases/latest/download/connect.s
 bash connect.sh --version
 ```
 
+It also runs piped, for example `curl -fsSL https://github.com/nano-rs/connect/releases/latest/download/connect.sh | bash -s -- list-sources --builtin-only`.
+Prompts can't read a piped terminal, so pass every value as a flag or variable.
+
 For automation, download `connect.sh` and `connect.sh.sha256` from the **same
 versioned release** and run `sha256sum --check connect.sh.sha256` before
 executing it.
