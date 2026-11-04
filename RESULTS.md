@@ -1,227 +1,111 @@
-# NAN-3942 0.4.3 — hosted routed sources and search-only discovery
+# NAN-4974: connect.sh 0.5.0 against the ClickHouse product
 
-RESUME 3 fixes are implemented on `fix/NAN-3942-hosted-routed` from main
-`b84f69c` in the requested isolated worktree.
+Target: nanosiem `clickhouse/dev` at `ae4872a3a` (API 0.1.703), OCSF schema
+profile (the install default), brought up with `scripts/e2e.sh up` as
+throwaway, ownership-labelled stacks on free ports. No shared or developer
+stack was used. Collectors ran in Docker from the client's own artifacts.
 
-- Hosted `source_type=routed` resolves the source's canonical `name`, so Apache
-  and other enabled tenant sources can import UI-created credentials and connect.
-- Enabled tenant sources bypass the community-only syslog filter. Application
-  parsers render HTTP push listeners; syslog metadata keeps raw socket listeners.
-  Unknown transport metadata defaults to HTTP, with explicit :tcp/:udp/:http
-  overrides. HTTP listener ports publish as TCP in Compose. HEC/HTTP upstream
-  sinks still have separate bound credentials and raw event payloads.
-- Discovery 403s permit import only with an explicitly supplied ingest endpoint
-  plus a token file/directory. Cached endpoints cannot authorize the fallback.
-  Warnings explain unavailable enablement/binding checks; fresh canonical search
-  evidence still proves delivery. Readable disabled sources and other discovery
-  errors fail. No hosted issuance, rotation or revocation API mutation is added.
+## Offline suite
 
-Validation: 112 offline CLI cases on Bash 5.3.15 and actual Bash 3.2.57, plus
-JSON/path/hash units on both, POSIX units, shellcheck, syntax/static portability,
-checksum and git whitespace checks. Retained TS structural goldens pass. Eight
-configurations, including the new Apache HTTP listener, pass upstream Vector
-0.59.0 `validate --no-environment` using a standalone binary downloaded into a
-private temporary directory. No host Docker, services or installers ran. CI also
-validates with the existing pinned upstream image digest.
+| Check | Result |
+|---|---|
+| `bash tests/bash/check.sh` (syntax, shellcheck, units, offline suite, Bash 3.2 syntax guard, `--posix` units) | pass |
+| `tests/bash/test.py` on Bash 5.3.15 | 108 checks pass |
+| `tests/bash/test.py` on Bash 3.2.57 (`TEST_BASH=/bin/bash`, macOS) | 108 checks pass |
+| `tests/bash/unit.sh` on Bash 3.2.57 and 5.3.15 | pass |
+| `tests/bash/test.py` with every generated config run through `vector validate --no-environment` in the pinned `timberio/vector:0.59.0-alpine` image | pass |
+| jq-less extractors on the live 5 MB parser catalog (73 records) | identical to jq, ~4 s (0.4.4's extractors did not finish in minutes) |
 
-New regression cases cover routed Apache render/connect, disabled sources,
-HTTP/raw TCP selection, discovery-denied token-file and per-source token-directory
-flows, multiple sources, explicit environment equivalents, cached endpoint refusal,
-missing token/source file, token-discovery403, and endpoint401/404/500 refusal.
-Fixture credentials alone are used; the supplied UI token file is untouched.
+New offline cases cover: ingest resolution (open core app host; enterprise
+dedicated frontend; enterprise without a configured base; enterprise with the
+endpoint unreadable; `--ingest-base` and `--ingest-url` precedence and saving;
+refusal of app-host destinations while a dedicated base is configured, by
+`--ingest-url`, HEC URL and `--ingest-base`; OTLP endpoint on the dedicated
+host), default HTTP transport, `delivery: none` stopping issuance, removed
+lake flags and env, `revoke-token`, and journald JSON output.
 
-Coordinator must rerun full hosted b12 CLI render/connect with the UI-issued
-Apache credential and search-only key, then verify distinct collector request
-markers within two minutes. Earlier live CT108 and supplemental hosted proof are
-in the connectlive lane; this patch makes no new live acceptance claim. No release,
-npm deprecation, get.nano.rs changes, live tenant/lab calls or Slack messages.
-Linear tools were unavailable in this session; the prior lane recorded its issue
-read, and this follow-up implements the explicit RESUME 3 scope from the brief.
+## Live: enterprise build, OCSF
 
----
+`capabilities.edition = enterprise`. Client pointed at the stack's edge
+(`NANO_URL` = edge origin, which is also the configured ingest base, so it is
+the not-dedicated case with the enterprise warning), and collectors in Docker
+used `--ingest-base http://host.docker.internal:<edge>`.
 
-# NAN-3942 0.4.2 — hosted UI credential import
+| Source | Collector | Transport | Result |
+|---|---|---|---|
+| syslog UDP, `cisco_asa` (registry parser imported and published by `--deploy-parsers`) | `add-source --run` (compose) | HEC, then HTTP | lands, `metadata.log_source=cisco_asa`, Network Activity |
+| syslog TCP, `palo_alto` (imported) | `add-source --run` | HEC, then HTTP | lands under `palo_alto` |
+| syslog UDP, generic `syslog` (imported) | `add-source --run` | HTTP | lands under `syslog` |
+| syslog TCP, generic `syslog` | `add-source --run` | HEC | **stored under `unknown`** (server, see findings) |
+| journald (`linux_journald`, imported) | `add-agent --os linux`, installed with the generated `nano-collector.service` on a systemd endpoint container | HEC, then HTTP | lands under `linux_journald` |
+| file (`--files /var/log/nan4974/*.log --file-source json_generic`, imported) | same agent | HTTP | lands under `json_generic` |
+| file, `json_generic` | same agent | HEC | **stored under `unknown`** (server, see findings) |
+| Windows Event Log + Sysmon | `add-agent --os windows` | HTTP | config passes `vector validate` (0.59.0). Also: the same config with only the `windows_event_log` source swapped for an HTTP JSON source, fed events in the Vector Windows shape: lands under `windows_event` and `windows_sysmon`, both mapped to an OCSF class |
+| `connect --source <s>` | direct marker | HTTP and HEC | marker searchable under the source (HEC: not for `syslog`/`json_generic`) |
+| `verify --source <s>` | fresh-event search | | counts per source, normalized vs Base Event |
+| `verify --evidence-file` | one marker per real request | | final HTTP matrix run (cisco_asa, palo_alto, syslog, linux_journald, json_generic): four found within 120 s; the cisco_asa event was held by the collector until the next cisco_asa event, then both were found (see the straggler finding) |
 
-The latest coordinator decision is implemented: hosted source credentials are
-created/revealed in Settings → ingest credentials for that source and supplied
-with `--token-file`/NANO_TOKEN_FILE, hidden input, or a per-source token directory.
-They are stored 0600 in 0700 profile directories, reused and rendered through the
-existing secret backend. No hosted issuance/reveal/revoke mutation or crypto
-runtime was added. Hosted rotate/revoke print UI guidance; open-core automatic
-lifecycle remains intact.
+Dedicated ingest frontend, live: with `NANO_URL` set to the API port directly,
+the instance's configured base (the edge) is a different origin, so the client
+reported `Dedicated ingest frontend: http://127.0.0.1:<edge>`, sent the
+`connect` marker there and found it; `--ingest-url http://127.0.0.1:<api>/ingest`
+was refused (`refusing to send events to the app origin`).
 
-Optional --credential-id validates readable hosted metadata: active, source kind,
-exact single-source allowlist, matching protocol. The listing has no fingerprint;
-metadata alone cannot link the secret to the ID. Fresh connect searches require
-canonical metadata.log_source and the request marker; collector delivery still
-requires distinct per-request evidence. Missing metadata access is explicit,
-never a fabricated validation claim. README documents scopes and examples.
+## Live: open-core build, OCSF
 
-Validation: 91 offline CLI checks pass on Bash 5.3.15 and actual Bash 3.2.57;
-JSON/path/hash units pass on both, plus Bash POSIX units, shellcheck, syntax/static
-portability, checksum and whitespace checks. Existing TS goldens run in the suite;
-Vector rendering is unchanged, so prior pinned-image validation applies. No Docker
-was run on the host in this follow-up.
+Built with `--edition open` into a separate `CARGO_TARGET_DIR`;
+`capabilities.edition = open`. Fresh profile, fresh stack (no pre-existing log
+sources: every source below was imported from the registry and published by
+the client with `--deploy-parsers`). Default transport (HTTP) throughout.
 
-Tests add hosted import/reuse, HEC/HTTP connectivity, denied metadata, optional ID,
-wrong source/protocol/kind/state, unknown ID, multi-source single-file rejection,
-and rotate/revoke UI guidance with no hosted credential mutation.
+| Source | Collector | Result |
+|---|---|---|
+| syslog UDP `cisco_asa`, syslog TCP `palo_alto`, syslog UDP `syslog` | one `add-source --run` collector (compose) | all three found in one evidence run |
+| journald `linux_journald` | `add-agent --os linux` installed with the generated systemd unit | found; the sshd failure line mapped to Authentication (1 normalized) |
+| file `json_generic` | same agent | found |
+| Windows `windows_event` + `windows_sysmon` | `add-agent --os windows`: `vector validate` pass; simulated-source run | both found, both mapped to an OCSF class |
+| `verify --evidence-file` | the five Linux/syslog lanes | **all five found within 120 s in one run** |
+| `connect --source cisco_asa` | HTTP and HEC | found both ways |
+| `verify --source` | seven sources | fresh counts for each |
+| `rotate-token --source syslog` + collector restart | | new token active, old revoked, fresh event found |
+| `revoke-token --source syslog` | | both revoked; the collector's next request was refused (401) and the event never landed |
+| `otlp-config` | | `OTEL_EXPORTER_OTLP_ENDPOINT=<edge>/otlp`. A protobuf OTLP log with that token was accepted (200; a bogus token got 401) but stored under `unknown` (server finding 1 applies to OTLP too) |
+| Bash 3.2.57 (`/bin/bash`) with `CONNECT_NO_JQ=1` | `add-source` against the live 5 MB catalog | 2.3 s |
 
-Live CT108/hosted b12, two-source collector deadline, Windows and OTLP release
-acceptance remain coordinator work. No release or npm deprecation is authorized
-by offline checks. Earlier reports below describe historical blockers superseded
-by this explicit UI-import decision.
+## Findings on clickhouse/dev (server side, not client bugs)
 
----
+1. **HEC lane loses the source for generic OCSF parsers.**
+   `config/vector/00-base.toml` `source_type_extract` stashes
+   `%source_type = downcase(source_type)` for the OCSF lane; `02-hec-source.toml`
+   `hec_normalize` sets `.source_type` from the token but never stashes
+   `%source_type`. The OCSF `_ocsf_prepare` step reads `%source_type`, so a parser
+   that doesn't hardcode `metadata.log_source` (generic `syslog`, `json_generic`)
+   stores HEC events with `metadata.log_source = source_type = unknown`. Vendor
+   parsers (cisco_asa, palo_alto, linux_journald) set it themselves and are
+   unaffected. The same events over HTTP land correctly. Confirmed live for
+   OTLP too: an authenticated OTLP log bound to `json_generic` was stored under
+   `unknown`. Fix: stash `%source_type` at the end of `hec_normalize` and the
+   OTLP prep transform, as `source_type_extract` does.
+2. **HEC indexer acknowledgements are refused.** `POST /services/collector/ack`
+   returns 400 (`BadRequest` in the server's Vector log), so `splunk_hec_logs`
+   logs `indexer_ack_failed` and falls back to acknowledging on the 200.
 
-# NAN-3942 live-proof follow-up — BLOCKED on hosted lifecycle
+Because of (1), and because `/ingest` is the TLS-terminated edge path (HEC is
+plain HTTP on 8088 by default), 0.5.0 makes `--transport http` the default.
 
-The 0.4.1 follow-up fixes the missing HEC channel and adds per-request delivery
-evidence. Hosted detection/scopes are implemented; hosted automatic credential
-issuance/reuse/rotation is **not complete**, so this is not release-ready.
+## Findings on the collector side
 
-- HEC curl requests now require a UUID v4 channel, private and stable per
-  profile/source. Vector's existing HEC sink already generates a channel in
-  `src/sinks/splunk_hec/common/service.rs` and uses it for event/ack requests;
-  no unsupported Vector config option was added.
-- `verify --evidence-file FILE --wait-seconds 120` checks distinct markers from
-  actual collector requests under `metadata.log_source`, remembers successes,
-  and shares a deadline across sources. A partial result fails. Snapshot mode
-  is `--wait-seconds 0`. The coordinator must record send times separately;
-  the deadline here measures polling time, not time since external sends.
-- Mock routing now stores claimed-source-B requests with token A under A.
-  Wrong-source imports still fail locally. Server refusal is expected for revoked
-  tokens, not for a claim that the server overrides with the token binding.
-- Open-core 404 triggers hosted endpoint/credential discovery rather than an
-  unconditional open-core prerequisite. Denials name `log_sources:view`,
-  `log_sources:deploy`, `search:execute`, open-core `settings:system`, and source
-  visibility. Hosted detection stops before requesting or revoking anything.
-
-## Hosted blocker and evidence
-
-Read the hosted handlers and core types in local nanosiem `lean-lake-merge`:
-`nanosiem-enterprise/src/handlers/enterprise_shared_sources.rs` (request, poll,
-reveal, revoke) and `nanosiem-core/src/enterprise_shared_sources.rs` (endpoint).
-Read nano-main origin/main's `packages/shared/src/crypto/ingest-credential-envelope.ts`,
-`apps/api/src/services/shared-infrastructure/ingest-credential-seal.ts`, and
-`apps/api/src/services/hosted-shared-ingest-credentials.ts`. The org-facing
-nano-main service can return plaintext to its separately authenticated org API;
-it is not the tenant SIEM API or authenticated by its `NANO_API_KEY`.
-
-Tenant API contract:
-`POST /api/log-sources/ingest-credentials` takes `kind: source`, one `source_slugs`
-entry, `protocol: hec|nano_https|otlp_http`, `reveal_public_key`, and reveal-key
-algorithm. Poll `GET .../requests/{id}`, then `POST .../requests/{id}/reveal` once.
-The revealed token is an X25519/P-256 ECDH + HKDF-SHA256 + AES-256-GCM envelope,
-AAD request UUID concatenated with tenant UUID. The API does not return plaintext.
-Stock `openssl enc` does not support AEAD/GCM; optional openssl alone does not
-supply the required authenticated opener. Implementing custom GCM in shell is
-not a reviewed crypto solution. An approved authenticated-decryption runtime or
-server-supported CLI issuance contract is needed to finish automatic hosted
-lifecycle within the allowed dependency model. This run adds neither dependency
-nor an unauthenticated decrypt/fallback, and does not claim hosted support.
-
-Inspected the credential provisioning/hosted sections of nano-ludus PR #6: its hosted path accepts pre-issued source
-tokens; only open-core provisions through `/api/ingest-tokens`. It does not solve
-the hosted encrypted issuance requirement.
-
-## Follow-up validation
-
-- 77 offline CLI checks pass on Bash 5.3.15 and actual Bash 3.2.57.
-- JSON/escaping/path/hash units pass on both versions and Bash POSIX mode.
-- Shellcheck, Bash syntax, static Bash 3.2 compatibility and git whitespace pass.
-- Existing structural TS goldens remain checked by the full suite. Rendering and
-  the pinned image are unchanged; no new host Docker/installer/service execution.
-- New tests cover required/stable/distinct HEC channels, two-source complete and
-  delayed evidence, partial and wrong-source evidence, duplicate marker refusal,
-  deadline expiry, final line without newline, hosted alternate API detection,
-  and scope-denied diagnostics. Fixtures do not establish live hosted acceptance.
-
-## Coordinator work still required
-
-Do not release or deprecate npm. Resolve the hosted runtime/API contract, complete
-hosted lifecycle support and rerun CT108 + hosted b12 acceptance with fresh keys
-having the stated scopes. Send distinct markers through both collector listeners,
-record their send times, and run evidence verification immediately. Repeat
-revoke/rotate isolation and confirm requests land under their token's source.
-No live tenant/lab API, service, installer, host Docker, Slack, or secret output
-was used in this follow-up. The earlier implementation report follows for history.
-
----
-
-# NAN-3942 standalone Bash client results
-
-Implemented `connect.sh` 0.4.0, primary-path documentation, a complete TS-module
-inventory in PARITY.md, version/checksum release packaging, and offline tests.
-The npm source/package is retained. get.nano.rs is untouched.
-
-## Validation
-
-- Bash 5.3.15 and actual Bash 3.2.57: **62 offline CLI checks on each**
-  in the lifecycle/rendering/negative harness plus JSON extraction/escaping/path/hash unit tests. The Bash 3.2
-  interpreter is extracted into a temporary directory from the pinned official
-  container; no system installation or build is performed.
-- Shellcheck `-s bash`: connect.sh and test shell runners are clean; Bash syntax
-  and a static 3.2 incompatibility guard pass. POSIX-mode Bash also passes units.
-- TypeScript-generated goldens: source configs and collection VRL match the retained
-  syslog, Linux, Windows and aggregator renderers. Sink changes are asserted:
-  distinct source credentials, raw text codec, minimum durable disk buffers,
-  secret-directory backend and HEC acknowledgements.
-- Seven real Vector validations: HEC syslog, HTTP syslog, Linux journald, file-only
-  agent, trusted-native agent, aggregator+syslog, multiple file paths. They run
-  `validate --no-environment` only, in read-only/networkless containers mounting
-  temporary output. Pinned collector image:
-  `timberio/vector:0.59.0-alpine@sha256:0e36bc2a290039e9b6a5e92f04bd2f133223506f72d09682c1df16c015172b7a`.
-- The pinned nano.7 **server** image was also tried and rejected the HEC sink:
-  its trimmed build omits edge/sender components. The upstream collector digest
-  above matches nano-ludus #6 and is intentionally used instead.
-- Actionlint passes for the new GitHub workflow; checksum and git whitespace
-  checks pass. No repository-wide formatter was run.
-- Credential cases include create/reuse/rotate, bind supplied unbound, reject
-  wrong-source/revoked/disabled/legacy/shared credentials, per-instance isolation,
-  secret mode repair, and recovery after failed revoke. The mock asserts both
-  replacement state and sender token file exist before old-token revocation.
-  Outputs are checked against fixture secrets; curl gets headers/body via private
-  files rather than secret command-line arguments.
-- Deployment steps use PATH-stubbed curl/docker/sudo/systemctl. No installer,
-  service, tenant/lab API, VM, or live sender was run. No Slack messages were sent.
-
-## Outstanding coordinator acceptance
-
-This is implementation/offline proof, not a claim that the issue's live acceptance
-has been met. The coordinator must run against **CT108 open core and hosted b12**:
-
-1. Resolve the actual API and ingest endpoints and supply the scoped administrator
-   key through a secret manager. Import/publish the selected source parsers.
-2. Generate/deploy the collector on those intended targets; confirm a different
-   named bound credential for every source, raw HEC/HTTP payload shape, and events
-   searchable under the correct source with expected normalized fields.
-3. Re-run to prove reuse, rotate with replacement files persisted first, reload
-   the sender, then revoke a test source credential and prove the next request is
-   refused while another source continues to work.
-4. Execute the generated Windows MSI/service flow on an authorized Windows
-   endpoint. Linux cannot validate the Windows-only event source; its config and
-   collection VRL have golden parity, but no Windows execution is claimed.
-5. OTLP: nano-rs/nanosiem#6811 was **OPEN, unmerged and unreleased** when inspected.
-   After a release includes it, opt in with NANO_OTLP_SOURCE_AUTH_RELEASED=1,
-   generate a separate exporter env per source, and prove /otlp/v1/logs,
-   /otlp/v1/metrics and /otlp/v1/traces enforce current binding/revocation state.
-   nginx must call /api/internal/otlp-auth per request, overwrite credential/source
-   identity headers, and fail closed if the auth service fails. Never use raw ports.
-6. Publish the script/checksum release only after the coordinator approves the live
-   proof. npm deprecation remains deferred until then. No release is published
-   by this implementation run; the PR is for coordinator review/merge.
-
-## Reproduction
-
-```bash
-pnpm exec tsx tests/bash/golden.ts
-bash tests/bash/check.sh
-VECTOR_VALIDATE=1 python3 tests/bash/test.py
-python3 tests/bash/bash32.py
-sha256sum --check connect.sh.sha256
-```
-
-Python 3.11+ and Node are test tooling only. Runtime needs Bash/curl/coreutils and
-awk/sed/grep, with jq optional. Read PARITY.md for intentional native/legacy-token,
-profile migration, endpoint-probing and UI changes, and JSON fallback limitations.
+- **A single straggler event can wait for the next one.** Twice in the live
+  runs, after several idle minutes, one sink took an event into its disk
+  buffer but didn't send it until the next event for that source arrived; both
+  were then delivered together (Vector metrics: buffer received 2, sink received
+  1, then 3/3 after one more event). It didn't reproduce with an isolated Vector
+  0.59 disk buffer to a local HTTP server, including after 100 s idle. It may be
+  idle-connection handling through Docker Desktop's `host.docker.internal`.
+  Continuous traffic never shows it; an evidence check that sends a single event
+  per source after a long idle can.
+- On a revoked token Vector's `http` sink treats the 401 as not retriable and
+  drops the request, so rotate (replacement first) rather than revoke a token a
+  running collector still uses.
+- The Linux agent used to replay the whole journal on first start (2,400+
+  entries on the test endpoint). 0.5.0 sets `since_now = true`.

@@ -4,7 +4,7 @@
 set +x
 set -euo pipefail
 umask 077
-VERSION=0.4.4
+VERSION=0.5.0
 VECTOR_IMAGE='timberio/vector:0.59.0-alpine@sha256:0e36bc2a290039e9b6a5e92f04bd2f133223506f72d09682c1df16c015172b7a'
 fail() { printf 'connect: %s\n' "$*" >&2; exit 1; }
 note() { if [ -t 1 ] && [ -z "${NO_COLOR+x}" ]; then printf '\033[36m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
@@ -15,68 +15,101 @@ field() {
   if command -v jq >/dev/null 2>&1 && [ "${CONNECT_NO_JQ:-0}" != 1 ]; then
     jq -er --arg k "$1" 'if has($k) and .[$k] != null then .[$k] | if type == "string" or type == "boolean" or type == "number" then tostring else empty end else empty end' 2>/dev/null
   else
-    awk -v want="$1" '
-    function string(   c,o,e) {
-      o=""; i++
-      while(i<=length(s)) {
-        c=substr(s,i++,1)
-        if(c=="\"") return o
+    # Linear scan: characters come from one split() (awk substr on a long
+    # string is O(length)), unwanted string values are skipped, and only the
+    # requested value is decoded, so large parser catalogs stay fast.
+    LC_ALL=C awk -v want="$1" '
+    function string(   c,o,e,st) {
+      o=""; i++; st=i
+      while(i<=n) {
+        c=ch[i]
+        if(c=="\"") {o=o substr(s,st,i-st); i++; return o}
         if(c=="\\") {
-          e=substr(s,i++,1)
+          o=o substr(s,st,i-st); e=ch[i+1]; i+=2; st=i
           if(e=="u") { bad=1; return "" }
-          if(e=="n") c="\n"; else if(e=="r") c="\r"; else if(e=="t") c="\t"
-          else if(e=="\"" || e=="\\" || e=="/") c=e
+          if(e=="n") o=o "\n"; else if(e=="r") o=o "\r"; else if(e=="t") o=o "\t"
+          else if(e=="\"" || e=="\\" || e=="/") o=o e
           else { bad=1; return "" }
+          continue
         }
-        o=o c
+        i++
       }
       bad=1; return ""
     }
+    function skip(   c) {
+      i++
+      while(i<=n) { c=ch[i++]; if(c=="\\") {i++; continue}; if(c=="\"") return }
+      bad=1
+    }
     {s=s $0 "\n"}
     END {
-      depth=0
-      for(i=1;i<=length(s);) {
-        c=substr(s,i,1)
-        if(c=="{" || c=="[") {depth++; i++; continue}
-        if(c=="}" || c=="]") {depth--; i++; continue}
+      n=split(s,ch,""); depth=0; val=0; hit=0
+      for(i=1;i<=n;) {
+        c=ch[i]
+        if(c=="{" || c=="[") {depth++; val=0; hit=0; i++; continue}
+        if(c=="}" || c=="]") {depth--; hit=0; i++; continue}
+        if(c==",") {val=0; hit=0; i++; continue}
+        if(c==":") {
+          i++; val=1
+          if(!hit) continue
+          while(ch[i] ~ /[ \t\r\n]/) i++
+          if(ch[i]=="\"") {v=string(); if(bad) exit 1; print v; exit 0}
+          tail=substr(s,i,64)
+          if(match(tail,/^(true|false|-?[0-9]+([.][0-9]+)?)/)) {print substr(tail,1,RLENGTH); exit 0}
+          exit 1
+        }
         if(c!="\"") {i++; continue}
+        if(val) {skip(); if(bad) exit 1; val=0; continue}
         key=string(); if(bad) exit 1
-        while(substr(s,i,1) ~ /[ \t\r\n]/) i++
-        if(depth!=1 || key!=want || substr(s,i,1)!=":") continue
-        i++; while(substr(s,i,1) ~ /[ \t\r\n]/) i++
-        if(substr(s,i,1)=="\"") {v=string(); if(bad) exit 1; print v; exit 0}
-        tail=substr(s,i)
-        if(match(tail,/^(true|false|-?[0-9]+([.][0-9]+)?)/)) {print substr(tail,1,RLENGTH); exit 0}
-        exit 1
+        hit=(depth==1 && key==want)
       }
       exit 1
     }'
   fi
 }
-# Extract a known named array (or a bare array), then emit its immediate objects.
-# Nested objects, escaped quotes, and braces inside strings do not split records.
+# Extract a known named array (or a bare array), then emit its immediate objects,
+# one per line. Nested objects, escaped quotes, and braces inside strings do not
+# split records. JSON strings cannot hold raw newlines, so the stream is cut into
+# short chunks (linear in awk) and each record is printed back in pieces.
 records() {
-  awk -v key="$1" '
-  {s=s $0 "\n"}
-  END {
-    start=1
-    if(s !~ /^[ \r\n\t]*\[/) {
-      pat="\"" key "\"[ \t\r\n]*:[ \t\r\n]*\\["
-      if(!match(s,pat)) exit 1
-      start=RSTART+RLENGTH-1
+  if command -v jq >/dev/null 2>&1 && [ "${CONNECT_NO_JQ:-0}" != 1 ]; then
+    jq -c --arg k "$1" '(if type == "array" then . else .[$k] end) | if type == "array" then .[] | select(type == "object") else error("missing") end' 2>/dev/null
+    return
+  fi
+  tr -d '\r\n' | fold -b -w 256 | LC_ALL=C awk -v key="$1" '
+  BEGIN {top=""; depth=0; instr=0; esc=0; keying=0; colon=0; lastkey=""; inarr=0; d=0; inrec=0; done=0}
+  done {next}
+  {
+    n=split($0,ch,""); from=1
+    for(i=1;i<=n;i++) {
+      c=ch[i]
+      if(instr) {
+        if(esc) esc=0
+        else if(c=="\\") esc=1
+        else if(c=="\"") {instr=0; if(keying) {lastkey=kb; keying=0}}
+        if(keying && instr && !esc && c!="\\") kb=kb c
+        continue
+      }
+      if(c=="\"") {instr=1; if(!inarr && depth==1 && !colon) {keying=1; kb=""}; continue}
+      if(c ~ /[ \t]/) continue
+      if(!inarr) {
+        if(top=="") {top=c; if(c=="[") {inarr=1; d=0; continue}}
+        if(c=="{" || c=="[") {depth++; if(c=="[" && depth==2 && colon && lastkey==key) {inarr=1; d=0}; continue}
+        if(c=="}" || c=="]") {depth--; continue}
+        if(depth==1 && c==":") colon=1
+        if(depth==1 && c==",") {colon=0; lastkey=""}
+        continue
+      }
+      if(c=="{" || c=="[") {if(c=="{" && d==0) {inrec=1; from=i}; d++; continue}
+      if(c=="}" || c=="]") {
+        d--
+        if(d<0) {done=1; break}
+        if(d==0 && inrec && c=="}") {print substr($0,from,i-from+1); inrec=0}
+      }
     }
-    instr=0; esc=0; depth=0; begin=0; array=0
-    for(i=start;i<=length(s);i++) {
-      c=substr(s,i,1)
-      if(instr) {if(esc) esc=0; else if(c=="\\") esc=1; else if(c=="\"") instr=0; continue}
-      if(c=="\"") {instr=1; continue}
-      if(c=="[") array++
-      if(c=="]") {array--; if(array==0) exit 0}
-      if(c=="{") {if(depth==0) begin=i; depth++}
-      if(c=="}") {depth--; if(depth==0 && begin) {r=substr(s,begin,i-begin+1); gsub(/\n/," ",r); print r; begin=0}}
-    }
-    exit 1
-  }'
+    if(inrec) {printf "%s", substr($0,from)}
+  }
+  END {exit !done}'
 }
 quote() {
   # JSON string encoder, also valid for TOML basic strings.
@@ -142,7 +175,7 @@ request() {
 api() {
   request "$1" "$URL/api/$2" "${3:-}" && return 0
   if [ "$HTTP_CODE" = 403 ]; then
-    fail "API permission denied: $2 requires log_sources:view for discovery, log_sources:deploy for hosted issuance/revocation, settings:system for open-core tokens; search:execute for verification (and source visibility)"
+    fail "API permission denied: $2 (discovery needs log_sources:view; issuing, binding, rotating and revoking ingest tokens need settings:system; parser import needs parser_repositories:import, log_sources:create, source_configs:edit and log_sources:deploy; verification needs search:execute and visibility of the source)"
   fi
   fail "API request failed (HTTP $HTTP_CODE); check permissions and server version"
 }
@@ -201,74 +234,102 @@ profile() {
   printf '%s' "$API_KEY" | atomic "$STATE/api-key"
   printf '%s' "$URL" | atomic "$CONFIG/current"
   [ -n "$SEARCH_URL" ] || { [ ! -f "$STATE/search-url" ] || SEARCH_URL=$(cat "$STATE/search-url"); }
-  [ -n "$INGEST_URL" ] || { [ ! -f "$STATE/ingest-$TRANSPORT-url" ] || INGEST_URL=$(cat "$STATE/ingest-$TRANSPORT-url"); }
   [ -n "$SEARCH_URL" ] || SEARCH_URL=$URL/api/search
-  [ -n "$INGEST_URL" ] || { if [ "$TRANSPORT" = http ]; then INGEST_URL=$URL/ingest/; else INGEST_URL=$URL; fi; }
-  url_check "$INGEST_URL"; url_check "$SEARCH_URL"
+  url_check "$SEARCH_URL"
   printf '%s' "$SEARCH_URL" | atomic "$STATE/search-url"
-  printf '%s' "$INGEST_URL" | atomic "$STATE/ingest-$TRANSPORT-url"
+  # Only explicitly supplied ingest destinations are saved; discovered ones are
+  # re-read every run so a newly configured ingest frontend takes effect.
+  # A destination given on this run replaces saved ones: a new --ingest-base
+  # is not overridden by an older saved --ingest-url.
+  if [ -n "$INGEST_URL" ]; then url_check "$INGEST_URL"; printf '%s' "$INGEST_URL" | atomic "$STATE/ingest-$TRANSPORT-url"
+  elif [ -n "$INGEST_BASE" ]; then rm -f "$STATE/ingest-$TRANSPORT-url"
+  elif [ -f "$STATE/ingest-$TRANSPORT-url" ]; then INGEST_URL=$(cat "$STATE/ingest-$TRANSPORT-url")
+  fi
+  if [ -n "$INGEST_BASE" ]; then
+    INGEST_BASE=${INGEST_BASE%/}; url_check "$INGEST_BASE"
+    [ "$INGEST_BASE" = "$(origin_of "$INGEST_BASE")" ] || fail '--ingest-base takes an origin only (scheme://host[:port]), no path'
+    printf '%s' "$INGEST_BASE" | atomic "$STATE/ingest-base"
+  elif [ -f "$STATE/ingest-base" ]; then INGEST_BASE=$(cat "$STATE/ingest-base")
+  fi
+}
+# scheme://authority of a checked URL, and the authority's host without port.
+origin_of() { local rest=${1#*://}; printf '%s://%s' "${1%%://*}" "${rest%%/*}" | tr '[:upper:]' '[:lower:]'; }
+host_of() {
+  local authority=${1#*://}; authority=${authority%%/*}
+  case "$authority" in \[*) authority=${authority%%]*}]; ;; *) authority=${authority%%:*} ;; esac
+  printf '%s' "$authority" | tr '[:upper:]' '[:lower:]'
+}
+# Ingest destination. Enterprise deployments (self-hosted enterprise, k8s,
+# BYOC, Civo) serve ingest from a dedicated frontend on its own hostname; open
+# core serves /ingest on the app host. Precedence: --ingest-url (exact, per
+# transport) > --ingest-base (origin) > the instance's configured ingest base
+# (GET /api/log-sources/ingest-endpoint) > the app host, only when the instance
+# reports no dedicated base. Events never go to the app host while a dedicated
+# ingest base is configured.
+resolve_ingest() {
+  local app edition='' configured='' base='' hec='' discovered=0 dedicated='' from=''
+  app=$(origin_of "$URL")
+  if request GET "$URL/api/capabilities"; then edition=$(get edition "$RESPONSE" || :); fi
+  if request GET "$URL/api/log-sources/ingest-endpoint"; then
+    discovered=1
+    configured=$(get configured "$RESPONSE" || :); base=$(get base_url "$RESPONSE" || :)
+    hec=$(get hec_url "$RESPONSE" || :)
+    [ -z "$base" ] || url_check "$base"; [ -z "$hec" ] || url_check "$hec"
+    if [ "$configured" = true ] && [ -n "$base" ] && [ "$(origin_of "$base")" != "$app" ]; then dedicated=$(origin_of "$base"); fi
+  elif [ "$HTTP_CODE" != 403 ] && [ "$HTTP_CODE" != 404 ]; then
+    fail "Ingest endpoint discovery failed (HTTP $HTTP_CODE)"
+  fi
+  if [ -z "$INGEST_URL" ]; then
+    if [ -n "$INGEST_BASE" ]; then from=$INGEST_BASE
+    elif [ -n "$dedicated" ]; then from=$dedicated; note "Dedicated ingest frontend: $dedicated"
+    elif [ "$discovered" = 0 ] && [ "$edition" != open ]; then
+      fail 'Cannot read the ingest endpoint (GET /api/log-sources/ingest-endpoint needs log_sources:view). Enterprise deployments ingest on a dedicated host: pass --ingest-base https://ingest.<domain> (or --ingest-url)'
+    else
+      from=$app
+      [ "$edition" != enterprise ] || note 'Enterprise instance reports no dedicated ingest base (NANO_INGEST_PUBLIC_BASE_URL); using the app host. Pass --ingest-base to use your ingest frontend'
+    fi
+    case "$TRANSPORT" in
+      http) INGEST_URL=$from/ingest ;;
+      otlp) INGEST_URL=$from/otlp ;;
+      hec)
+        if [ -n "$hec" ] && [ "$from" = "$(origin_of "$base")" ]; then INGEST_URL=$hec
+        elif [ -n "$hec" ]; then
+          # Same HEC listener scheme/port, on the chosen ingest host.
+          INGEST_URL=${hec%%://*}://$(host_of "$from"):${hec##*:}
+        else INGEST_URL=${from%%://*}://$(host_of "$from"):8088
+        fi ;;
+    esac
+  fi
+  INGEST_URL=${INGEST_URL%/}; url_check "$INGEST_URL"
+  if [ -n "$dedicated" ]; then
+    if [ "$(host_of "$dedicated")" != "$(host_of "$app")" ]; then
+      [ "$(host_of "$INGEST_URL")" != "$(host_of "$app")" ] || fail "This instance ingests through a dedicated frontend ($dedicated); refusing to send events to the app host. Drop the app-host --ingest-url/--ingest-base"
+    else
+      [ "$(origin_of "$INGEST_URL")" != "$app" ] || fail "This instance ingests through a dedicated frontend ($dedicated); refusing to send events to the app origin"
+    fi
+  fi
+  note "Ingest ($TRANSPORT): $INGEST_URL"
 }
 catalog() {
   printf '%s\n' 'cisco_asa 5514 udp' 'palo_alto 5515 tcp' 'fortinet 5516 udp' 'cisco_ios 5517 udp' 'juniper_srx 5518 udp' 'sonicwall 5519 udp' 'pfsense 5520 udp' 'linux_syslog 5521 udp' 'f5_bigip 5522 tcp'
 }
-# Discovery may be skipped only with an explicitly supplied destination and token.
-supplied_hosted() {
-  [ "$EXPLICIT_INGEST_URL" = 1 ] && { [ -n "$TOKEN_FILE" ] || [ -n "$TOKEN_DIR" ]; }
-}
-# Only enabled bindable sources can receive credentials when discovery is readable.
+# Log Sources discovery: every push-capable source a token can be bound to,
+# and the issued tokens (never their values). GET needs log_sources:view.
 load_tokens() {
-  if request GET "$URL/api/ingest-tokens"; then
-    DEPLOYMENT=open-core
-  elif [ "$HTTP_CODE" = 404 ] || { [ "$HTTP_CODE" = 403 ] && supplied_hosted; }; then
-    # With denied discovery, an explicit token + destination permits import only.
-    if request GET "$URL/api/log-sources/ingest-endpoint"; then
-      get base_url "$RESPONSE" >/dev/null || fail 'Unknown deployment: no hosted ingest endpoint contract'
-    elif [ "$HTTP_CODE" = 403 ] && supplied_hosted; then
-      note 'Discovery forbidden (log_sources:view); using explicitly supplied ingest URL and source credential. Binding must be proven with fresh search evidence'
-    else
-      fail "Ingest endpoint discovery failed (HTTP $HTTP_CODE); requires log_sources:view, or supply --token-file/--token-dir and --ingest-url"
-    fi
-    DEPLOYMENT=hosted
-    if [ "$ROTATE" = 1 ] || [ "$COMMAND" = revoke-token ]; then
-      fail 'Hosted rotate/revoke: use Settings → ingest credentials for that source; create and save the replacement before revoking the old credential, then rerun with --token-file'
-    fi
-    : > "$WORK/hosted-credentials"
-    if request GET "$URL/api/log-sources/ingest-credentials"; then
-      printf '%s' "$RESPONSE" | records credentials > "$WORK/hosted-credentials" || fail 'Malformed hosted credential listing'
-    elif [ "$HTTP_CODE" != 403 ]; then
-      fail "Hosted credential discovery failed (HTTP $HTTP_CODE)"
-    else
-      note 'Hosted credential metadata unavailable; log_sources:view and source visibility are needed. Verify fresh request evidence before trusting delivery'
-    fi
-    DISCOVERY_UNAVAILABLE=0
-    if request GET "$URL/api/log-sources"; then
-      printf '%s' "$RESPONSE" | records log_sources > "$WORK/hosted-sources" || fail 'Malformed hosted source listing'
-    elif [ "$HTTP_CODE" = 403 ] && supplied_hosted; then
-      DISCOVERY_UNAVAILABLE=1
-      : > "$WORK/hosted-sources"
-      note 'Source discovery forbidden (log_sources:view); source enablement/binding unverified. search:execute and source visibility are required for connect/verify'
-    else
-      fail "Source discovery failed (HTTP $HTTP_CODE); requires log_sources:view, or supply --token-file/--token-dir and --ingest-url"
-    fi
-    : > "$WORK/sources"; : > "$WORK/tokens"
-    local row st sid
-    while IFS= read -r row; do
-      st=$(get source_type "$row" || :)
-      # Hosted source_type describes ingestion (routed), not the canonical slug.
-      case "$st" in routed|'') st=$(get name "$row") || fail 'Hosted source lacks name' ;; esac
-      safe_id "$st"
-      sid=$(get id "$row") || fail 'Hosted source lacks id'
-      if [ "$(get enabled "$row" || :)" != false ]; then
-        printf '{"source_id":%s,"route_key":%s,"enabled":true}\n' "$(q "$sid")" "$(q "$st")" >> "$WORK/sources"
-      fi
-    done < "$WORK/hosted-sources"
-    return
-  else
-    fail "Open-core token discovery failed (HTTP $HTTP_CODE); requires settings:system. Hosted discovery requires log_sources:view; issuance requires log_sources:deploy; verification requires search:execute"
+  if ! request GET "$URL/api/ingest-tokens"; then
+    case "$HTTP_CODE" in
+      403) fail 'Source discovery denied: GET /api/ingest-tokens needs log_sources:view (issuing, binding, rotating and revoking tokens need settings:system)' ;;
+      404) fail 'Server lacks the per-source ingest-token API (NAN-4907); upgrade nano' ;;
+      *) fail "Ingest token discovery failed (HTTP $HTTP_CODE)" ;;
+    esac
   fi
   LISTING=$RESPONSE
-  printf '%s' "$LISTING" | records sources > "$WORK/sources" || fail 'Server lacks source-bound credential API (NAN-3806); upgrade nano'
+  printf '%s' "$LISTING" | records sources > "$WORK/sources" || fail 'Server lacks the source-bound credential API (NAN-4907); upgrade nano'
   printf '%s' "$LISTING" | records tokens > "$WORK/tokens" || fail 'Malformed token listing'
+  DELIVERY=$(get delivery "$LISTING" || :)
+}
+require_delivery() {
+  [ "$DELIVERY" != none ] || fail 'Ingest token delivery to Vector is not configured on this deployment (NANO_INGEST_TOKENS_DELIVERY); no token can be issued or bound'
 }
 source_id() {
   local row route enabled found=
@@ -279,11 +340,6 @@ source_id() {
       found=$(get source_id "$row") || fail 'Missing source id'
     fi
   done < "$WORK/sources"
-  if [ -z "$found" ] && [ "${DISCOVERY_UNAVAILABLE:-0}" = 1 ]; then
-    if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ]; then found=supplied
-    elif [ -n "$TOKEN_DIR" ] && [ -f "$TOKEN_DIR/$1" ]; then found=supplied
-    fi
-  fi
   [ -n "$found" ] || return 1
   printf '%s' "$found"
 }
@@ -305,37 +361,6 @@ retire_pending() {
   fi
   rm -f "$pending"
 }
-hosted_credential() {
-  local st=$1 value='' row found=0 protocol
-  [ "$ROTATE" = 0 ] || fail 'Hosted rotation: use Settings → ingest credentials for that source, then rerun with --token-file'
-  if [ -n "$TOKEN_FILE" ]; then
-    if [ -f "$WORK/wanted" ] && [ "$(wc -l < "$WORK/wanted")" -gt 1 ]; then fail '--token-file requires one source; use --token-dir for multiple sources'; fi
-    [ -f "$TOKEN_FILE" ] || fail 'Missing --token-file'
-    value=$(cat "$TOKEN_FILE")
-  elif [ -n "$TOKEN_DIR" ] && [ -f "$TOKEN_DIR/$st" ]; then value=$(cat "$TOKEN_DIR/$st")
-  elif [ -f "$STATE/credentials/$st/hosted-token" ]; then value=$(cat "$STATE/credentials/$st/hosted-token")
-  else value=$(prompt "Hosted source credential for $st: create in Settings → ingest credentials, or pass --token-file" '' 1)
-  fi
-  [[ "$value" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || fail 'Invalid or empty hosted credential'
-  if [ -n "$CREDENTIAL_ID" ]; then
-    protocol=$TRANSPORT; [ "$protocol" != http ] || protocol=nano_https
-    [ "$COMMAND" != otlp-config ] || protocol=otlp_http
-    while IFS= read -r row; do
-      [ "$(get credential_id "$row" || :)" = "$CREDENTIAL_ID" ] || continue
-      [ "$found" = 0 ] || fail 'Ambiguous hosted credential id'
-      found=1
-      if [ "$(get state "$row" || :)" != active ] || [ "$(get kind "$row" || :)" != source ] || [ "$(get protocol "$row" || :)" != "$protocol" ]; then fail 'Hosted credential is inactive, shared, or uses another protocol'; fi
-      # Known contract: source credentials have exactly one ASCII source slug.
-      printf '%s' "$row" | grep -Eq '"source_slugs"[[:space:]]*:[[:space:]]*\[[[:space:]]*"'"$st"'"[[:space:]]*\]' || fail 'Hosted credential belongs to another source'
-    done < "$WORK/hosted-credentials"
-    [ "$found" = 1 ] || fail 'Hosted credential id not readable; check log_sources:view and source visibility'
-    note 'Hosted credential metadata matches requested source/protocol; token possession and binding require fresh connectivity evidence'
-  else
-    note 'Hosted listing has no token fingerprint; use --credential-id for metadata checks and connect/verify for actual token binding proof'
-  fi
-  printf '%s' "$value" | atomic "$STATE/credentials/$st/hosted-token"
-  TOKEN=$value; persist_artifact_token "$st"
-}
 find_credential() {
   local row value found=
   while IFS= read -r row; do
@@ -352,8 +377,6 @@ credential() {
   sid=$(source_id "$st") || fail "No enabled bindable source for $st; deploy its parser first"
   safe_id "$sid"
   private_dir "$STATE/credentials"; private_dir "$STATE/credentials/$st"
-  if [ "$DEPLOYMENT" = hosted ]; then hosted_credential "$st"; return; fi
-  [ -z "$TOKEN_FILE" ] || fail 'Open-core uses --token-dir with one named credential per source'
   local store=$STATE/credentials/$st/current
   if [ -n "$TOKEN_DIR" ] && [ -f "$TOKEN_DIR/$st" ]; then
     [ "$ROTATE" = 0 ] || fail 'To rotate a managed credential, omit --token-dir'
@@ -364,6 +387,7 @@ credential() {
     cid=$(get credential_id "$row"); safe_id "$cid"
     state=$(get state "$row")
     if [ "$state" = unbound ]; then
+      require_delivery
       api POST "ingest-tokens/$cid/bind" "{\"source_id\":$(q "$sid")}"; load_tokens
       row=$(find_credential credential_id "$cid") || fail 'Bound credential not found'
     fi
@@ -383,6 +407,7 @@ credential() {
     cid=''; value=''
   fi
   if [ -z "$value" ]; then
+    require_delivery
     api POST ingest-tokens "{\"name\":$(q "nano-connect-$st-$(date +%s)"),\"source_id\":$(q "$sid")}"
     value=$(get token "$RESPONSE") || fail 'Create response missing token'
     # credential_id is inside credential; known narrow extraction, no eval.
@@ -435,18 +460,31 @@ aliases() {
     on {exit}'
   printf '%s' "$1" | sed -n 's/.*"match_values"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' | tr ',' '\n' | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//'
 }
+# An exact name wins (the registry's OCSF parsers are named <source>_ocsf),
+# then any match value. Several parsers can share a match value (windows_event
+# has JSON, XML and text variants); the <source>_ocsf JSON parser is preferred.
 lookup_in() {
   local want=$1 file=$2 row name alias
   [ -f "$file" ] || return 1
   while IFS= read -r row; do
     [ "$(get kind "$row" || :)" != enrichment ] || continue
     name=$(get name "$row" || :)
-    if [ "$name" = "$want" ]; then printf '%s' "$row"; return; fi
+    if [ "$name" = "$want" ] || [ "$name" = "${want}_ocsf" ]; then printf '%s' "$row"; return; fi
+  done < "$file"
+  while IFS= read -r row; do
+    [ "$(get kind "$row" || :)" != enrichment ] || continue
     while IFS= read -r alias; do
       if [ "$alias" = "$want" ]; then printf '%s' "$row"; return; fi
     done < <(aliases "$row")
   done < "$file"
   return 1
+}
+# The route key nano gives a source made from this parser or log source row:
+# its first match value, else its name.
+parser_route() {
+  local first
+  first=$(aliases "$1" | sed -n '/./{p;q;}')
+  if [ -n "$first" ]; then printf '%s' "$first"; else get name "$1"; fi
 }
 lookup_parser() { lookup_in "$1" "$WORK/parsers"; }
 syslog_collectable() {
@@ -468,14 +506,18 @@ review_parser() {
   local st=$1 row path id
   if source_id "$st" >/dev/null; then return; fi
   row=$(lookup_parser "$st" || :)
-  [ -n "$row" ] || fail "No bindable source or community parser for $st"
+  [ -n "$row" ] || fail "No bindable source or registry parser for $st"
   [ "$DEPLOY_PARSERS" = 1 ] || confirm "Import and publish parser for $st?" || fail 'Deploy the parser first, or pass --deploy-parsers'
   path=$(get file_path "$row") || fail 'Parser file path missing'
   case "$path" in /*|*../*|*/..|..) fail 'Unsafe parser path' ;; esac
   path=$(printf '%s' "$path" | encode_path)
+  # Import validates the parser and publish regenerates and reloads Vector's
+  # configuration; both can take well over the default request timeout.
+  REQUEST_TIMEOUT=180
   api POST "parser-repositories/$REPO_ID/parsers/import/$path" '{"import_type":"linked","ingestion_method":"routed"}'
   id=$(get log_source_id "$RESPONSE") || fail 'Import response missing log source id'; safe_id "$id"
   api POST "log-sources/$id/publish"
+  REQUEST_TIMEOUT=25
   [ "$(get success "$RESPONSE" || :)" = true ] || fail 'Parser publish failed; source is not ready'
   load_tokens
   source_id "$st" >/dev/null || fail 'Published parser has no enabled credential binding'
@@ -500,17 +542,16 @@ hash_port() {
   printf '%s' "$((5600 + h % 100))"
 }
 canonical_source() {
-  local st=$1 row id item
+  local st=$1 row item
   if source_id "$st" >/dev/null; then printf '%s' "$st"; return; fi
+  # A bindable source listed by name (Log Source name, not route key).
+  while IFS= read -r item; do
+    if [ "$(get name "$item" || :)" = "$st" ] && [ "$(get enabled "$item" || :)" = true ]; then get route_key "$item"; return; fi
+  done < "$WORK/sources"
   row=$(lookup_in "$st" "$WORK/deployed" || :)
-  if [ -n "$row" ]; then
-    id=$(get id "$row" || :)
-    while IFS= read -r item; do
-      if [ "$(get source_id "$item" || :)" = "$id" ]; then get route_key "$item"; return; fi
-    done < "$WORK/sources"
-  fi
+  [ -z "$row" ] || { parser_route "$row"; return; }
   row=$(lookup_parser "$st" || :)
-  if [ -n "$row" ]; then get name "$row"; else printf '%s' "$st"; fi
+  if [ -n "$row" ]; then parser_route "$row"; else printf '%s' "$st"; fi
 }
 select_sources() {
   catalog > "$WORK/catalog"
@@ -595,10 +636,9 @@ source = '''
 EOF
 }
 render_sink() {
-  local st=$1 input=$2 codec=text content_type=text/plain
-  # Hosted HTTPS ingest validates JSON before handing the original message to
-  # the parser. Open core's byte decoder still needs raw lines on this path.
-  if [ "$DEPLOYMENT" = hosted ]; then codec=json; content_type=application/json; fi
+  local st=$1 input=$2
+  # The edge /ingest source splits newline-delimited bodies and keeps each
+  # text/plain line as the original message; HEC carries it as the event string.
   if [ "$TRANSPORT" = hec ]; then
     cat <<EOF
 [sinks.nano_$st]
@@ -620,11 +660,11 @@ type = "http"
 inputs = ["$input"]
 uri = $(q "$INGEST_URL")
 method = "post"
-encoding.codec = "$codec"
+encoding.codec = "text"
 framing.method = "newline_delimited"
 auth.strategy = "bearer"
 auth.token = "SECRET[nano_ingest.$st]"
-request.headers.Content-Type = "$content_type"
+request.headers.Content-Type = "text/plain"
 EOF
   fi
   cat <<EOF
@@ -668,6 +708,9 @@ EOF
     cat <<'EOF'
 [sources.journald]
 type = "journald"
+# First start reads from now, like the Windows agent; afterwards the
+# checkpoint resumes where it left off.
+since_now = true
 [transforms.tag]
 type = "remap"
 inputs = ["journald"]
@@ -676,6 +719,19 @@ ident = downcase(string(.SYSLOG_IDENTIFIER) ?? "")
 unit = downcase(string(._SYSTEMD_UNIT) ?? "")
 source_type = "linux_journald"
 if contains(ident, "sysmon") || contains(unit, "sysmon") { source_type = "linux_sysmon" }
+if source_type == "linux_journald" {
+  # The journald parser reads one `journalctl -o json` entry per event: send
+  # the whole entry with journald's own field names, not just MESSAGE.
+  # Sysmon for Linux keeps its raw XML MESSAGE for the sysmon parser.
+  entry = .
+  entry.MESSAGE = .message
+  entry._HOSTNAME = .host
+  del(entry.message)
+  del(entry.host)
+  del(entry.timestamp)
+  del(entry.source_type)
+  .message = encode_json(entry)
+}
 .source_type = source_type
 .src_host = get_hostname!()
 '''
@@ -866,13 +922,18 @@ verify_evidence() {
 verify() {
   if [ -n "$EVIDENCE_FILE" ]; then verify_evidence; return; fi
   [ -n "$SOURCE" ] || SOURCE=$(prompt 'Source type (--source)' '')
-  safe_id "$SOURCE"; search "source_type=\"$SOURCE\""
+  # Fresh events stored under the source (metadata.log_source is the token's
+  # bound route, whatever the sender claimed), within --window minutes.
+  safe_id "$SOURCE"; search "metadata.log_source=\"$SOURCE\""
   printf '%s' "$RESPONSE" | records results > "$WORK/results" || fail 'Malformed search response'
-  local count generic failed row parsed key val
+  local count generic failed row parsed key val cls
   count=$(wc -l < "$WORK/results" | tr -d ' '); generic=0; failed=0; parsed=0
   while IFS= read -r row; do
     if printf '%s' "$row" | grep -Eq '"parser_type"[[:space:]]*:[[:space:]]*"generic"'; then generic=$((generic+1))
     elif printf '%s' "$row" | grep -Eq '"(ext[.])?parse_error"[[:space:]]*:[[:space:]]*"[^" ]'; then failed=$((failed+1))
+    elif cls=$(get class_uid "$row"); then
+      # OCSF rows: a mapped class is normalized; class 0 (Base Event) is not.
+      if [ "$cls" != 0 ]; then parsed=$((parsed+1)); else generic=$((generic+1)); fi
     else
       for key in src_ip dest_ip src_port dest_port protocol action user src_user dest_user process_name file_path file_name url query; do
         val=$(get "$key" "$row" || :)
@@ -880,16 +941,15 @@ verify() {
       done
     fi
   done < "$WORK/results"
-  note "$count sampled searchable events ($parsed normalized, $generic generic, $failed parser failures; sample limit 100)"
+  note "$count fresh events under metadata.log_source=$SOURCE in the last $WINDOW minutes ($parsed normalized, $generic generic, $failed parser failures; sample limit 100)"
   [ "$count" -gt 0 ] || return 1
 }
 connect_flow() {
   [ -n "$SOURCE" ] || SOURCE=$(prompt 'Existing source for connectivity test (--source)' '')
   safe_id "$SOURCE"; load_tokens
-  if [ "$DEPLOYMENT" != hosted ]; then
-    api GET setup/status
-    [ "$(get initialized "$RESPONSE")" = true ] || fail 'Complete initial server setup first'
-  fi
+  api GET setup/status
+  [ "$(get initialized "$RESPONSE")" = true ] || fail 'Complete initial server setup first'
+  resolve_ingest
   credential "$SOURCE"
   local marker n=0
   marker=nano-connect-$(date +%s)-$$-$RANDOM
@@ -932,21 +992,21 @@ parsers() {
 help_text() {
   cat <<EOF
 nano-connect $VERSION — Bash 3.2+, curl, coreutils, awk/sed/grep (jq optional)
-Usage: bash connect.sh [connect|add-source|add-agent|add-aggregator|list-sources|sync-parsers|verify|rotate-token|otlp-config] [flags]
-  --url URL / NANO_URL                  --api-key KEY / NANO_API_KEY
+Usage: bash connect.sh [connect|add-source|add-agent|add-aggregator|list-sources|sync-parsers|verify|rotate-token|revoke-token|otlp-config] [flags]
+  --url URL / NANO_URL (the nano app)    --api-key KEY / NANO_API_KEY
   --email EMAIL / NANO_EMAIL            --password PASSWORD / NANO_PASSWORD
   --env-file FILE (read BASE_URL only; never execute)
-  --transport hec|http (default hec; direct native nano uplink refused)
-  --ingest-url URL / NANO_INGEST_URL     --search-url URL / NANO_SEARCH_URL
+  --transport http|hec / NANO_TRANSPORT (default http: <ingest>/ingest; hec: the HEC listener)
+  --ingest-base ORIGIN / NANO_INGEST_BASE (dedicated ingest host, e.g. https://ingest.example.com)
+  --ingest-url URL / NANO_INGEST_URL (exact URL for the transport)
+  --search-url URL / NANO_SEARCH_URL
   --source TYPE / NANO_SOURCE           --sources a,b:tcp,c:http / NANO_SOURCES
-  --token-file FILE / NANO_TOKEN_FILE (hosted single-source credential)
-  --credential-id ID / NANO_CREDENTIAL_ID (optional hosted metadata check)
   --token-dir DIR / NANO_TOKEN_DIR (one named source credential per file)
   --rotate (persist replacement before revocation)
   --os linux|windows / NANO_OS          --target HOST:PORT (trusted aggregator)
   --no-journald                        --files PATH --file-source TYPE
   --agent-port PORT (9000)              --out-dir DIR / NANO_OUT_DIR
-  --deploy-parsers (import + publish matching community parsers)
+  --deploy-parsers (import + publish matching registry parsers)
   --run (docker compose deployment)     --window MINUTES (15)
   --add-official                        --builtin-only
   --yes / NANO_YES=1                    --non-interactive / NANO_NON_INTERACTIVE=1
@@ -954,22 +1014,23 @@ Usage: bash connect.sh [connect|add-source|add-agent|add-aggregator|list-sources
   --wait-seconds SECONDS / NANO_WAIT_SECONDS (120; evidence deadline)
   --version                            --help
 Secrets are never shown. Prefer env variables/private files over secret flags.
-OTLP exporters: use source-bound Bearer credentials at /otlp/v1/{logs,metrics,traces}
-only after nano-rs/nanosiem#6811 is released (NANO_OTLP_SOURCE_AUTH_RELEASED=1).
-The /api/internal/otlp-auth endpoint is server-internal; clients use /otlp.
-No raw OTLP port fallback.
+Ingest: the instance's configured ingest base (Log Sources ingest endpoint) is used
+when it is dedicated; the app host's /ingest only when none is configured. Events are
+never sent to the app host while a dedicated ingest base is configured.
+OTLP exporters (otlp-config) use the source-bound Bearer token at <ingest>/otlp/v1/*.
 EOF
 }
 main() {
   URL=${NANO_URL:-}; API_KEY=${NANO_API_KEY:-}; EMAIL=${NANO_EMAIL:-}; PASSWORD=${NANO_PASSWORD:-}; JWT=
-  INGEST_URL=${NANO_INGEST_URL:-}; SEARCH_URL=${NANO_SEARCH_URL:-}; ENV_FILE=
+  INGEST_URL=${NANO_INGEST_URL:-}; INGEST_BASE=${NANO_INGEST_BASE:-}; DELIVERY=; SEARCH_URL=${NANO_SEARCH_URL:-}; ENV_FILE=
   SOURCE=${NANO_SOURCE:-}; SOURCES=${NANO_SOURCES:-}; OUT=${NANO_OUT_DIR:-}; OS=${NANO_OS:-}; TARGET=${NANO_TARGET:-}
-  TRANSPORT=${NANO_TRANSPORT:-hec}; TOKEN_DIR=${NANO_TOKEN_DIR:-}; TOKEN_FILE=${NANO_TOKEN_FILE:-}; CREDENTIAL_ID=${NANO_CREDENTIAL_ID:-}; DEPLOYMENT=; ROTATE=0; RUN=0; JOURNALD=1; FILES=; FILE_SOURCE=application
-  OTLP_READY=${NANO_OTLP_SOURCE_AUTH_RELEASED:-0}; AGENT_PORT=9000; WINDOW=15; DEPLOY_PARSERS=0; NATIVE_INPUT=tag; ADD_OFFICIAL=0; BUILTIN=0; YES=${NANO_YES:-0}; NONINTERACTIVE=${NANO_NON_INTERACTIVE:-0}
+  TRANSPORT=${NANO_TRANSPORT:-http}; TOKEN_DIR=${NANO_TOKEN_DIR:-}; ROTATE=0; RUN=0; JOURNALD=1; FILES=; FILE_SOURCE=application
+  AGENT_PORT=9000; WINDOW=15; DEPLOY_PARSERS=0; NATIVE_INPUT=tag; ADD_OFFICIAL=0; BUILTIN=0; YES=${NANO_YES:-0}; NONINTERACTIVE=${NANO_NON_INTERACTIVE:-0}
   CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/nano-connect-bash
   COMMAND=connect; UPSTREAM=tag; TOKEN=; HEC_CHANNEL=
   EVIDENCE_FILE=${NANO_EVIDENCE_FILE:-}; WAIT_SECONDS=${NANO_WAIT_SECONDS:-120}
   [ -t 0 ] || NONINTERACTIVE=1
+  [ -z "${NANO_TOKEN_FILE:-}${NANO_CREDENTIAL_ID:-}" ] || fail 'NANO_TOKEN_FILE/NANO_CREDENTIAL_ID were lake-hosted credentials, removed in 0.5.0; use --token-dir or let connect issue a token'
   while [ "$#" -gt 0 ]; do
     case "$1" in
       connect|add-source|add-agent|add-aggregator|list-sources|list-devices|sync-parsers|verify|rotate-token|revoke-token|otlp-config) COMMAND=$1; shift ;;
@@ -978,25 +1039,27 @@ main() {
       --run) RUN=1; shift ;; --rotate) ROTATE=1; shift ;; --no-journald) JOURNALD=0; shift ;;
       --add-official) ADD_OFFICIAL=1; shift ;; --builtin-only) BUILTIN=1; shift ;;
       --to-nano) TARGET=; shift ;;
-      --url|--api-key|--email|--password|--env-file|--ingest-url|--search-url|--source|--sources|--devices|--out-dir|--os|--target|--transport|--token-dir|--token-file|--credential-id|--files|--file-source|--agent-port|--window|--evidence-file|--wait-seconds)
+      --url|--api-key|--email|--password|--env-file|--ingest-url|--search-url|--source|--sources|--devices|--out-dir|--os|--target|--transport|--token-dir|--ingest-base|--files|--file-source|--agent-port|--window|--evidence-file|--wait-seconds)
         [ "$#" -ge 2 ] || fail 'Flag requires a value'
         case "$1" in
           --url) URL=$2 ;; --api-key) API_KEY=$2 ;; --email) EMAIL=$2 ;; --password) PASSWORD=$2 ;; --env-file) ENV_FILE=$2 ;;
           --ingest-url) INGEST_URL=$2 ;; --search-url) SEARCH_URL=$2 ;; --source) SOURCE=$2 ;;
           --sources|--devices) SOURCES=$2 ;; --out-dir) OUT=$2 ;; --os) OS=$2 ;; --target) TARGET=$2 ;;
-          --token-file) TOKEN_FILE=$2 ;; --credential-id) CREDENTIAL_ID=$2 ;; --transport) TRANSPORT=$2 ;; --token-dir) TOKEN_DIR=$2 ;; --files) FILES=$2 ;; --file-source) FILE_SOURCE=$2 ;;
+          --ingest-base) INGEST_BASE=$2 ;; --transport) TRANSPORT=$2 ;; --token-dir) TOKEN_DIR=$2 ;; --files) FILES=$2 ;; --file-source) FILE_SOURCE=$2 ;;
           --agent-port) AGENT_PORT=$2 ;; --window) WINDOW=$2 ;;
           --evidence-file) EVIDENCE_FILE=$2 ;; --wait-seconds) WAIT_SECONDS=$2 ;;
         esac; shift 2 ;;
+      --token-file|--credential-id) fail 'Lake-hosted source credentials were removed in 0.5.0; connect issues a per-source ingest token, or use --token-dir' ;;
       --ingest-token) fail 'Shared ingest token removed; use --token-dir with one bound credential per source' ;;
       --mtls-dir|--vector-host|--vector-port) fail 'Direct native nano uplink bypasses source credentials; use HEC/HTTP' ;;
       --deploy-parsers) DEPLOY_PARSERS=1; shift ;;
       *) fail 'Unknown command or flag; see --help' ;;
     esac
   done
-  EXPLICIT_INGEST_URL=0; [ -z "$INGEST_URL" ] || EXPLICIT_INGEST_URL=1
-  DISCOVERY_UNAVAILABLE=0
-  case "$TRANSPORT" in hec|http) ;; *) fail 'Use hec or http; native nano uplink bypasses source-bound credentials' ;; esac
+  case "$TRANSPORT" in hec|http) ;; *) fail 'Use http or hec; native nano uplink bypasses source-bound credentials' ;; esac
+  # An OTLP exporter has its own destination (<ingest>/otlp); --ingest-url here
+  # is the OTLP endpoint and is saved separately from the collector transports.
+  [ "$COMMAND" != otlp-config ] || TRANSPORT=otlp
   if ! [[ "$WAIT_SECONDS" =~ ^[0-9]{1,3}$ ]] || [ "$WAIT_SECONDS" -gt 120 ]; then fail 'Evidence deadline must be 0-120 seconds'; fi
   WAIT_SECONDS=$((10#$WAIT_SECONDS))
   safe_id "$FILE_SOURCE"
@@ -1018,19 +1081,26 @@ main() {
     verify) verify ;;
     sync-parsers) parsers ;;
     otlp-config)
-      [ "$OTLP_READY" = 1 ] || fail 'OTLP source auth requires nano-rs/nanosiem#6811 (unreleased at implementation); set NANO_OTLP_SOURCE_AUTH_RELEASED=1 only on a server shipping that contract'
       [ -n "$SOURCE" ] || fail 'Pass --source for this OTLP exporter'
       safe_id "$SOURCE"; load_tokens
+      # OTLP goes through the ingest edge's /otlp (token checked per request).
+      resolve_ingest
       [ -n "$OUT" ] || OUT=./onboarding/otlp-$SOURCE
       private_dir "$OUT"; private_dir "$OUT/secrets"
       credential "$SOURCE"
       printf '%s' "$TOKEN" | atomic "$OUT/secrets/$SOURCE"
-      { printf 'OTEL_EXPORTER_OTLP_ENDPOINT=%s/otlp\n' "$URL"; printf 'OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\n'; printf "OTEL_EXPORTER_OTLP_HEADERS='Authorization=Bearer %s'\n" "$TOKEN"; } | atomic "$OUT/otel.env"
+      { printf 'OTEL_EXPORTER_OTLP_ENDPOINT=%s\n' "$INGEST_URL"; printf 'OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf\n'; printf "OTEL_EXPORTER_OTLP_HEADERS='Authorization=Bearer %s'\n" "$TOKEN"; } | atomic "$OUT/otel.env"
       note 'Private OTLP exporter environment generated. Each source needs its own exporter and bound credential; the server enforces revocation per request'
       ;;
     revoke-token)
-      load_tokens
-      fail 'Open-core revocation uses the credential API; hosted revocation uses Settings → ingest credentials for that source'
+      [ -n "$SOURCE" ] || fail 'Pass --source'
+      safe_id "$SOURCE"; load_tokens
+      local store=$STATE/credentials/$SOURCE/current cid
+      [ -f "$store" ] || fail 'No token issued by nano-connect for this source on this instance; revoke others in Log Sources → ingest tokens'
+      IFS= read -r cid < "$store"; safe_id "$cid"
+      find_credential credential_id "$cid" >/dev/null || fail 'Stored credential is not listed by this instance'
+      api POST "ingest-tokens/$cid/revoke"
+      rm -f "$store"; note "Ingest token for $SOURCE revoked; collectors using it are refused within seconds"
       ;;
     rotate-token)
       [ -n "$SOURCE" ] || fail 'Pass --source'
@@ -1040,22 +1110,25 @@ main() {
       ;;
     list-sources)
       catalog; load_tokens; load_catalog
-      while IFS= read -r row; do
-        local route
-        route=$(get route_key "$row" || :)
-        [ -z "$route" ] || printf '%s (instance)\n' "$route"
-      done < "$WORK/sources"
-      while IFS= read -r row; do
-        if syslog_collectable "$row" && [ "$(get kind "$row" || :)" != enrichment ]; then
-          route=$(get name "$row" || :)
-          [ -z "$route" ] || printf '%s (community)\n' "$route"
-        fi
-      done < "$WORK/parsers"
+      {
+        while IFS= read -r row; do
+          local route
+          route=$(get route_key "$row" || :)
+          [ -z "$route" ] || printf '%s (instance)\n' "$route"
+        done < "$WORK/sources"
+        while IFS= read -r row; do
+          if syslog_collectable "$row" && [ "$(get kind "$row" || :)" != enrichment ]; then
+            route=$(parser_route "$row")
+            [ -z "$route" ] || printf '%s (registry)\n' "$route"
+          fi
+        done < "$WORK/parsers"
+      } | awk '!seen[$1]++'
       ;;
     add-source|add-agent|add-aggregator)
       if [ -z "$TARGET" ]; then
         load_tokens
         load_catalog
+        resolve_ingest
       fi
       : > "$WORK/selected"; : > "$WORK/agent-types"
       if [ "$COMMAND" = add-agent ]; then
