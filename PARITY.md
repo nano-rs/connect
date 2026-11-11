@@ -68,7 +68,7 @@ implementation. **drop**: lake-only, removed.
 | `add-aggregator` | keep | sinks via resolver |
 | `list-sources` / `list-devices` | change | registry rows show the route key (first match value, e.g. `cisco_asa` for `cisco_asa_ocsf`), labelled `(registry)`, deduplicated; registry lookups prefer `<name>_ocsf`, so `windows_event` resolves to the JSON parser, not the XML/text variants |
 | `sync-parsers` | keep | |
-| `verify --source` | change | searches `metadata.log_source` (was `source_type`) for fresh events in `--window` |
+| `verify --source` | change | searches `metadata.log_source` (was `source_type`) for fresh events in `--window`; a row counts as normalized when it has an OCSF `class_uid` other than 0, and as a parser failure when it carries `unmapped.parse_error`, an `unmapped.parse_fallback` marker, or `metadata.parse_error` (was top-level UDM keys and `ext.parse_error`); the TypeScript CLI's `verify` uses the same rules |
 | `verify --evidence-file` | keep | |
 | `rotate-token` | keep | |
 | `revoke-token` | change | implemented (0.4.4 always failed) |

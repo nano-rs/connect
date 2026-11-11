@@ -251,7 +251,7 @@ with tempfile.TemporaryDirectory(prefix='connect-tests-') as td:
     assert config()['sources']['files']['include']==['/var/log/a.log','/var/log/b.log']
     validate('multiple file paths')
     s=state();s['events']=[];(tmp/'state.json').write_text(json.dumps(s))
-    for rows,expected in [([{'src_ip':'10.0.0.1'}],'1 normalized'),([{'metadata':{'parser_type':'generic'}}],'1 generic'),([{'ext.parse_error':'format mismatch'}],'1 parser failures')]:
+    for rows,expected in [([{'class_uid':3002,'metadata.log_source':'cisco_asa'}],'1 normalized'),([{'class_uid':0},{'unmapped':{}}],'0 normalized, 0 generic, 0 parser failures'),([{'src_ip':'10.0.0.1'}],'0 normalized'),([{'metadata':{'parser_type':'generic'}}],'1 generic'),([{'class_uid':0,'unmapped':{'parse_error':'format mismatch'}}],'1 parser failures'),([{'class_uid':0,'unmapped.parse_fallback':True}],'1 parser failures'),([{'class_uid':4002,'unmapped':{'parse_fallback':False}}],'1 normalized'),([{'metadata':{'parse_error':'bad json'}}],'1 parser failures')]:
         p=run('verify','--source','cisco_asa',extra={'MOCK_RESULTS':json.dumps(rows)})
         assert expected in p.stdout
     run('verify','--source','cisco_asa',ok=False)

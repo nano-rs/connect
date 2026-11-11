@@ -63,7 +63,7 @@ export async function reviewParsers(
         `No parser yet for: ${none.map((s) => pc.cyan(s.sourceType)).join(", ")}`,
         "",
         "Data still flows and is searchable as generic logs — a parser just normalizes it into",
-        "UDM fields for better detection & dashboards. To add one:",
+        "OCSF fields for better detection & dashboards. To add one:",
         ...(noCatalog
           ? [
               `  • ${pc.cyan("connect sync-parsers")} — this instance has no parser catalog to match`,
@@ -120,7 +120,7 @@ async function handleAvailable(
             }`,
             "",
             "It will show up in nano under Log Sources, but nothing is parsing yet — events keep",
-            "landing as generic logs with no UDM fields, and detections keyed on UDM won't match.",
+            "landing as generic logs with no OCSF fields, and detections keyed on OCSF fields won't match.",
             "",
             `Finish it in the platform: ${pc.cyan("Log Sources")} → ${pc.cyan(s.sourceType)} → Deploy.`,
             `Then confirm with ${pc.cyan(`connect verify --source ${s.sourceType}`)}.`,
