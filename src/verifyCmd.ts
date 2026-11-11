@@ -71,7 +71,7 @@ export async function runVerify(opts: VerifyOptions): Promise<void> {
       log.warn(
         `A parser for ${pc.cyan(source)} is deployed and claiming these events, but can't read them` +
           `${result.parseError ? `: ${pc.dim(result.parseError)}` : "."} They're stored as raw logs ` +
-          `with no UDM fields. This is a format mismatch, not a missing parser — check the collector ` +
+          `with no OCSF fields. This is a format mismatch, not a missing parser — check the collector ` +
           `is sending the shape the parser expects (for syslog, the raw wire line rather than a ` +
           `pre-parsed or re-encoded event).`,
       );
@@ -82,8 +82,8 @@ export async function runVerify(opts: VerifyOptions): Promise<void> {
       log.warn(
         `These are landing in the generic lane (no active parser for ${pc.cyan(
           source,
-        )}), so they're searchable as raw logs but carry no UDM fields — detections and dashboards ` +
-          `that key on UDM won't match. Deploy a parser: Platform → Parser Editor, or re-run ` +
+        )}), so they're searchable as raw logs but carry no OCSF fields — detections and dashboards ` +
+          `that key on OCSF fields won't match. Deploy a parser: Platform → Parser Editor, or re-run ` +
           `${pc.cyan("connect add-source --deploy-parsers")}. If a log source already exists for ` +
           `${pc.cyan(source)}, check it's actually deployed — one can exist without an active parser.`,
       );
@@ -108,7 +108,8 @@ export async function runVerify(opts: VerifyOptions): Promise<void> {
         pc.green(`${shown} ${source} event(s) searchable in the last ${windowMin}m — normalized ✓`),
       );
     } else {
-      // Rows came back without a parser_type we recognize (e.g. an OCSF-shaped row).
+      // Rows arrived but carry no specific OCSF class (class_uid 0, Base Event) — a correct parse for
+      // some sources, so report arrival without claiming or denying normalization.
       s.stop(pc.green(`${shown} ${source} event(s) searchable in the last ${windowMin}m`));
     }
   } else {
@@ -116,7 +117,7 @@ export async function runVerify(opts: VerifyOptions): Promise<void> {
     log.info(
       `Either your devices aren't sending yet, or events are arriving but not yet normalized (no parser for ${pc.cyan(
         source,
-      )}). Check the collector is up and devices point at it; deploy a parser to normalize this source into UDM fields.`,
+      )}). Check the collector is up and devices point at it; deploy a parser to normalize this source into OCSF fields.`,
     );
   }
   outro(pc.green("Done."));

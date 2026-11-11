@@ -13,9 +13,9 @@ const POLL_INTERVAL_MS = 2_000;
  * Poll search until our test event shows up (or we give up). Ingestion → parse → searchable
  * has a few seconds of latency, so we retry rather than checking once.
  *
- * We query by source_type (always a real column) and scan returned rows for the unique marker,
- * rather than querying the marker as an `ext` field — ext-field query semantics are fiddly and a
- * generic-parsed test event lands its marker inside the message / ext blob.
+ * We query by `metadata.log_source` (the route the event was stored under) and scan returned
+ * rows for the unique marker, rather than querying the marker as a field: a test event lands its
+ * marker inside the message / raw body, wherever the parser put it.
  */
 export async function verifyMarker(
   client: NanoClient,
@@ -27,7 +27,7 @@ export async function verifyMarker(
   const deadline = Date.now() + timeoutMs;
   // Look back a generous window to absorb clock skew between client and server.
   const start = new Date(Date.now() - 15 * 60_000).toISOString();
-  const query = `source_type="${sourceType}"`;
+  const query = `metadata.log_source="${sourceType}"`;
 
   let attempts = 0;
   while (Date.now() < deadline) {
@@ -35,7 +35,7 @@ export async function verifyMarker(
     const end = new Date(Date.now() + 60_000).toISOString();
     try {
       const res = await client.search(query, start, end, 50);
-      // Count matches of OUR marker, not all events of this source_type in the window.
+      // Count matches of OUR marker, not all events from this source in the window.
       const matches = res.results.filter((row) => JSON.stringify(row).includes(marker));
       if (matches.length > 0) {
         return { arrived: true, count: matches.length, sample: matches[0], attempts };
@@ -88,60 +88,89 @@ export interface RecentCount {
   parseError?: string;
 }
 
-/** UDM columns a normalized event populates. Enough coverage to catch any parser family. */
-const UDM_SIGNALS = [
-  "src_ip",
-  "dest_ip",
-  "src_port",
-  "dest_port",
-  "protocol",
-  "action",
-  "user",
-  "src_user",
-  "dest_user",
-  "process_name",
-  "file_path",
-  "file_name",
-  "url",
-  "query",
-] as const;
+type RowState = "generic" | "failed" | "parsed" | "unknown";
 
-function hasUdmFields(row: Record<string, unknown>): boolean {
-  return UDM_SIGNALS.some((k) => {
-    const v = row[k];
-    if (typeof v === "string") return v !== "";
-    if (typeof v === "number") return v !== 0;
-    return false;
-  });
+/**
+ * Read a field from a search row, whether it came back as a dotted key (`unmapped.parse_error`),
+ * a nested object, a mix of both (`unmapped: { "metadata.parser_type": … }`), or a nested object
+ * serialized as a JSON string.
+ */
+function rowField(value: unknown, path: string): unknown {
+  if (typeof value === "string" && value.startsWith("{")) {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof value !== "object" || value === null) return undefined;
+  const obj = value as Record<string, unknown>;
+  if (path in obj) return obj[path];
+  for (let i = path.indexOf("."); i !== -1; i = path.indexOf(".", i + 1)) {
+    const head = path.slice(0, i);
+    if (head in obj) {
+      const found = rowField(obj[head], path.slice(i + 1));
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
 }
 
-type RowState = "generic" | "failed" | "parsed" | "unknown";
+/** First non-undefined value among `paths`. */
+function firstField(row: Record<string, unknown>, paths: string[]): unknown {
+  for (const p of paths) {
+    const v = rowField(row, p);
+    if (v !== undefined) return v;
+  }
+  return undefined;
+}
+
+function nonEmptyString(v: unknown): string | undefined {
+  return typeof v === "string" && v !== "" ? v : undefined;
+}
 
 /**
  * Which lane handled a row.
  *
- * Only the catch-all lane stamps `metadata.parser_type = "generic"` — a real parser stamps
- * nothing there, so its absence says nothing on its own. Normalization is therefore detected by
- * the UDM columns actually being populated, and a parser that ran but couldn't read the event
- * leaves `ext.parse_error` behind. That third state matters: it means the collector is delivering
- * a format the parser doesn't expect, which no amount of re-deploying will fix.
+ * - Failed: an OCSF parser that ran but couldn't read the event reports it in
+ *   `unmapped.parse_error` (or, when it only recognized the input as foreign, marks the minimal
+ *   record with `unmapped.parse_fallback`). A failure the pipeline caught before the OCSF lane
+ *   goes through the generic lane, which keeps the original record under `unmapped`, so its
+ *   error is `unmapped.metadata.parse_error`. Either way the collector is delivering a format the
+ *   parser doesn't expect, which no amount of re-deploying will fix. Checked before "generic"
+ *   because such a row carries the generic marker too.
+ * - Generic: only the catch-all lane stamps `parser_type = "generic"`. On OCSF data the lane
+ *   rebuilds `metadata` (just `log_source`) and keeps the original record, marker included, under
+ *   `unmapped`, so the marker is `unmapped.metadata.parser_type`.
+ * - Parsed: the row carries a real OCSF class (`class_uid` other than 0).
+ * - Unknown: anything else. `class_uid` 0 (Base Event) is a correct parse for some sources
+ *   (journald, unmapped Windows event IDs), so it is not reported as a failure either.
  */
-function classifyRow(row: Record<string, unknown>): { state: RowState; error?: string } {
-  const meta = (typeof row.metadata === "object" && row.metadata ? row.metadata : {}) as Record<
-    string,
-    unknown
-  >;
-  if (meta.parser_type === "generic") return { state: "generic" };
-  const err = row["ext.parse_error"] ?? meta.parse_error;
-  if (typeof err === "string" && err !== "") return { state: "failed", error: err };
-  if (hasUdmFields(row)) return { state: "parsed" };
+export function classifyRow(row: Record<string, unknown>): { state: RowState; error?: string } {
+  const err =
+    nonEmptyString(rowField(row, "unmapped.parse_error")) ??
+    nonEmptyString(rowField(row, "unmapped.metadata.parse_error")) ??
+    nonEmptyString(rowField(row, "metadata.parse_error"));
+  if (err) return { state: "failed", error: err };
+  const fallback = rowField(row, "unmapped.parse_fallback");
+  if (fallback !== undefined && fallback !== null && fallback !== false && fallback !== "") {
+    return {
+      state: "failed",
+      error: "the parser didn't recognize the input and kept only a minimal record",
+    };
+  }
+  if (firstField(row, ["unmapped.metadata.parser_type", "metadata.parser_type"]) === "generic") {
+    return { state: "generic" };
+  }
+  const cls = Number(rowField(row, "class_uid"));
+  if (Number.isFinite(cls) && cls !== 0) return { state: "parsed" };
   return { state: "unknown" };
 }
 
 const COUNT_SAMPLE_LIMIT = 100;
 
 /**
- * Sample events of a given source_type in the recent window — used to report on a real collector
+ * Sample events stored under a given source (`metadata.log_source`) in the recent window — used to report on a real collector
  * after it's wired up. Note: nano's search `total_count` tracks the returned page size, not the
  * true match total, and `limit: 0` reports zero — so we page a sample and report "N+" when full
  * rather than trusting total_count or asking for zero rows.
@@ -153,7 +182,7 @@ export async function countRecent(
 ): Promise<RecentCount> {
   const start = new Date(Date.now() - windowMinutes * 60_000).toISOString();
   const end = new Date(Date.now() + 60_000).toISOString();
-  const res = await client.search(`source_type="${sourceType}"`, start, end, COUNT_SAMPLE_LIMIT);
+  const res = await client.search(`metadata.log_source="${sourceType}"`, start, end, COUNT_SAMPLE_LIMIT);
   const count = res.results.length;
   let parsed = 0;
   let generic = 0;

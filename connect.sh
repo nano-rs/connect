@@ -926,19 +926,21 @@ verify() {
   # bound route, whatever the sender claimed), within --window minutes.
   safe_id "$SOURCE"; search "metadata.log_source=\"$SOURCE\""
   printf '%s' "$RESPONSE" | records results > "$WORK/results" || fail 'Malformed search response'
-  local count generic failed row parsed key val cls
+  local count generic failed row parsed cls
   count=$(wc -l < "$WORK/results" | tr -d ' '); generic=0; failed=0; parsed=0
   while IFS= read -r row; do
-    if printf '%s' "$row" | grep -Eq '"parser_type"[[:space:]]*:[[:space:]]*"generic"'; then generic=$((generic+1))
-    elif printf '%s' "$row" | grep -Eq '"(ext[.])?parse_error"[[:space:]]*:[[:space:]]*"[^" ]'; then failed=$((failed+1))
-    elif cls=$(get class_uid "$row"); then
-      # OCSF rows: a mapped class is normalized; class 0 (Base Event) is not.
-      if [ "$cls" != 0 ]; then parsed=$((parsed+1)); else generic=$((generic+1)); fi
-    else
-      for key in src_ip dest_ip src_port dest_port protocol action user src_user dest_user process_name file_path file_name url query; do
-        val=$(get "$key" "$row" || :)
-        if [ -n "$val" ] && [ "$val" != 0 ]; then parsed=$((parsed+1)); break; fi
-      done
+    # OCSF parsers report failures in unmapped.parse_error (or mark a minimal fallback record
+    # with unmapped.parse_fallback); pre-OCSF-lane failures reach the generic lane, which keeps
+    # the original record under unmapped, so they carry unmapped.metadata.parse_error AND the
+    # generic marker. Failures are checked first so they aren't reported as generic.
+    if printf '%s' "$row" | grep -Eq '"((unmapped|metadata)[.])*parse_error"[[:space:]]*:[[:space:]]*"[^" ]'; then failed=$((failed+1))
+    elif printf '%s' "$row" | grep -Eq '"(unmapped[.])?parse_fallback"[[:space:]]*:[[:space:]]*([^fn"[:space:]]|"[^"])'; then failed=$((failed+1))
+    # The generic lane's marker sits at unmapped.metadata.parser_type on OCSF rows.
+    elif printf '%s' "$row" | grep -Eq '"((unmapped|metadata)[.])*parser_type"[[:space:]]*:[[:space:]]*"generic"'; then generic=$((generic+1))
+    elif cls=$(get class_uid "$row") && [ -n "$cls" ] && [ "$cls" != 0 ]; then
+      # A real OCSF class is normalized. Class 0 (Base Event) is a correct parse for some
+      # sources, so it counts as neither normalized nor generic.
+      parsed=$((parsed+1))
     fi
   done < "$WORK/results"
   note "$count fresh events under metadata.log_source=$SOURCE in the last $WINDOW minutes ($parsed normalized, $generic generic, $failed parser failures; sample limit 100)"
