@@ -91,24 +91,38 @@ export interface RecentCount {
 type RowState = "generic" | "failed" | "parsed" | "unknown";
 
 /**
- * Read a field from a search row, whether it came back as a dotted key, a nested object, or a
- * nested object serialized as a JSON string (the generic lane's `metadata`).
+ * Read a field from a search row, whether it came back as a dotted key (`unmapped.parse_error`),
+ * a nested object, a mix of both (`unmapped: { "metadata.parser_type": … }`), or a nested object
+ * serialized as a JSON string.
  */
-function rowField(row: Record<string, unknown>, path: string): unknown {
-  if (path in row) return row[path];
-  let cur: unknown = row;
-  for (const part of path.split(".")) {
-    if (typeof cur === "string" && cur.startsWith("{")) {
-      try {
-        cur = JSON.parse(cur);
-      } catch {
-        return undefined;
-      }
+function rowField(value: unknown, path: string): unknown {
+  if (typeof value === "string" && value.startsWith("{")) {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return undefined;
     }
-    if (typeof cur !== "object" || cur === null) return undefined;
-    cur = (cur as Record<string, unknown>)[part];
   }
-  return cur;
+  if (typeof value !== "object" || value === null) return undefined;
+  const obj = value as Record<string, unknown>;
+  if (path in obj) return obj[path];
+  for (let i = path.indexOf("."); i !== -1; i = path.indexOf(".", i + 1)) {
+    const head = path.slice(0, i);
+    if (head in obj) {
+      const found = rowField(obj[head], path.slice(i + 1));
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
+}
+
+/** First non-undefined value among `paths`. */
+function firstField(row: Record<string, unknown>, paths: string[]): unknown {
+  for (const p of paths) {
+    const v = rowField(row, p);
+    if (v !== undefined) return v;
+  }
+  return undefined;
 }
 
 function nonEmptyString(v: unknown): string | undefined {
@@ -118,20 +132,24 @@ function nonEmptyString(v: unknown): string | undefined {
 /**
  * Which lane handled a row.
  *
- * - Generic: only the catch-all lane stamps `metadata.parser_type = "generic"`.
  * - Failed: an OCSF parser that ran but couldn't read the event reports it in
  *   `unmapped.parse_error` (or, when it only recognized the input as foreign, marks the minimal
  *   record with `unmapped.parse_fallback`). A failure the pipeline caught before the OCSF lane
- *   lands with `metadata.parse_error`. Either way the collector is delivering a format the parser
- *   doesn't expect, which no amount of re-deploying will fix.
+ *   goes through the generic lane, which keeps the original record under `unmapped`, so its
+ *   error is `unmapped.metadata.parse_error`. Either way the collector is delivering a format the
+ *   parser doesn't expect, which no amount of re-deploying will fix. Checked before "generic"
+ *   because such a row carries the generic marker too.
+ * - Generic: only the catch-all lane stamps `parser_type = "generic"`. On OCSF data the lane
+ *   rebuilds `metadata` (just `log_source`) and keeps the original record, marker included, under
+ *   `unmapped`, so the marker is `unmapped.metadata.parser_type`.
  * - Parsed: the row carries a real OCSF class (`class_uid` other than 0).
  * - Unknown: anything else. `class_uid` 0 (Base Event) is a correct parse for some sources
  *   (journald, unmapped Windows event IDs), so it is not reported as a failure either.
  */
 export function classifyRow(row: Record<string, unknown>): { state: RowState; error?: string } {
-  if (rowField(row, "metadata.parser_type") === "generic") return { state: "generic" };
   const err =
     nonEmptyString(rowField(row, "unmapped.parse_error")) ??
+    nonEmptyString(rowField(row, "unmapped.metadata.parse_error")) ??
     nonEmptyString(rowField(row, "metadata.parse_error"));
   if (err) return { state: "failed", error: err };
   const fallback = rowField(row, "unmapped.parse_fallback");
@@ -140,6 +158,9 @@ export function classifyRow(row: Record<string, unknown>): { state: RowState; er
       state: "failed",
       error: "the parser didn't recognize the input and kept only a minimal record",
     };
+  }
+  if (firstField(row, ["unmapped.metadata.parser_type", "metadata.parser_type"]) === "generic") {
+    return { state: "generic" };
   }
   const cls = Number(rowField(row, "class_uid"));
   if (Number.isFinite(cls) && cls !== 0) return { state: "parsed" };

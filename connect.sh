@@ -929,11 +929,14 @@ verify() {
   local count generic failed row parsed cls
   count=$(wc -l < "$WORK/results" | tr -d ' '); generic=0; failed=0; parsed=0
   while IFS= read -r row; do
-    if printf '%s' "$row" | grep -Eq '"(metadata[.])?parser_type"[[:space:]]*:[[:space:]]*"generic"'; then generic=$((generic+1))
     # OCSF parsers report failures in unmapped.parse_error (or mark a minimal fallback record
-    # with unmapped.parse_fallback); pre-OCSF-lane failures carry metadata.parse_error.
-    elif printf '%s' "$row" | grep -Eq '"((unmapped|metadata)[.])?parse_error"[[:space:]]*:[[:space:]]*"[^" ]'; then failed=$((failed+1))
+    # with unmapped.parse_fallback); pre-OCSF-lane failures reach the generic lane, which keeps
+    # the original record under unmapped, so they carry unmapped.metadata.parse_error AND the
+    # generic marker. Failures are checked first so they aren't reported as generic.
+    if printf '%s' "$row" | grep -Eq '"((unmapped|metadata)[.])*parse_error"[[:space:]]*:[[:space:]]*"[^" ]'; then failed=$((failed+1))
     elif printf '%s' "$row" | grep -Eq '"(unmapped[.])?parse_fallback"[[:space:]]*:[[:space:]]*([^fn"[:space:]]|"[^"])'; then failed=$((failed+1))
+    # The generic lane's marker sits at unmapped.metadata.parser_type on OCSF rows.
+    elif printf '%s' "$row" | grep -Eq '"((unmapped|metadata)[.])*parser_type"[[:space:]]*:[[:space:]]*"generic"'; then generic=$((generic+1))
     elif cls=$(get class_uid "$row") && [ -n "$cls" ] && [ "$cls" != 0 ]; then
       # A real OCSF class is normalized. Class 0 (Base Event) is a correct parse for some
       # sources, so it counts as neither normalized nor generic.

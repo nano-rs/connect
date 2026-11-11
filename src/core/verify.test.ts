@@ -51,6 +51,28 @@ test("an unmapped.parse_fallback marker counts as a failure; false does not", ()
   assert.equal(classifyRow({ class_uid: 4002, unmapped: { parse_fallback: false } }).state, "parsed");
 });
 
+// What the OCSF generic lane actually stores: metadata rebuilt as { log_source }, the original
+// record (marker and any parse error included) kept under `unmapped`.
+const genericOcsfRow = {
+  class_uid: 0,
+  metadata: { log_source: "fooba" },
+  unmapped: { metadata: { parser_type: "generic", original_source_type: "fooba" }, message: "x" },
+};
+
+test("the OCSF generic lane row (marker under unmapped.metadata) is generic", () => {
+  assert.equal(classifyRow(genericOcsfRow).state, "generic");
+  assert.equal(classifyRow({ class_uid: 0, "unmapped.metadata.parser_type": "generic" }).state, "generic");
+  assert.equal(classifyRow({ class_uid: 0, unmapped: { "metadata.parser_type": "generic" } }).state, "generic");
+});
+
+test("a pre-OCSF failure routed through the generic lane is a failure, not generic", () => {
+  const row = {
+    ...genericOcsfRow,
+    unmapped: { metadata: { parser_type: "generic", parse_error: "not json" } },
+  };
+  assert.deepEqual(classifyRow(row), { state: "failed", error: "not json" });
+});
+
 function fakeClient(results: Record<string, unknown>[], queries: string[]): NanoClient {
   return {
     search: async (query: string) => {
